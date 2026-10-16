@@ -3,7 +3,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import create_engine, String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint
+from sqlalchemy import create_engine, String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +33,16 @@ class LoginSession(Base):
     id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+class AuthIdentity(Base):
+    """Provider identities map to local profiles; tokens are never stored here."""
+    __tablename__ = 'auth_identities'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    issuer: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(36), nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
+    __table_args__ = (UniqueConstraint('issuer', 'subject', name='auth_identity_issuer_subject'),)
 
 class Contact(Base):
     __tablename__ = 'contacts'

@@ -6,14 +6,14 @@ This is a **working local MVP**, not a deployment-ready commercial product. It t
 
 ## What is included
 
-- Email/password account registration, sign-in and sign-out; hashed passwords and HTTP-only login sessions.
+- Supabase email-code signup/sign-in in Docker, with local profiles and HTTP-only auth cookies; explicit local development mode retains email/password authentication.
 - **Off the Record**: default private lending and borrowing records; users can update notes, due dates, and item names and mark items returned without inviting anyone.
 - **On the Record**: optional invitations via private links; the other person can acknowledge or decline without a separate account. Sent ≠ accepted.
 - **Return tracking**: partial returns; either party can propose. Only the **lender** may confirm a shared return. Privately recorded returns are marked complete by the owner.
 - **Independent states**: `acknowledgment` (`NONE`, `PENDING`, `CONFIRMED`, `DECLINED`) is separate from settlement (`OUTSTANDING`, `PARTIAL`, `RETURNED`).
 - Searchable dashboard, lent/borrowed counts, overdue indicators, record activity history, mobile-responsive UI.
 - Invitation links expire after 30 days. Generating a replacement revokes prior links and requires fresh acknowledgment.
-- Per-account authorization and CSRF checks; 5 automated API test scenarios.
+- Per-account authorization and CSRF checks; API tests cover both local and Supabase authentication.
 
 ## Local Docker + PostgreSQL (recommended)
 
@@ -56,8 +56,14 @@ Database host `db` works inside the Docker network; desktop database clients use
 
 Data lives in the `postgres_data` named volume and survives container restart,
 recreation, and `docker compose down`. This starts a separate database: existing
-`udhaar.sqlite3` data is not imported. This setup uses the current local password
-authentication; Supabase integration will be a separate step.
+`udhaar.sqlite3` data is not imported. Docker defaults to Supabase email-code
+authentication. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in `.env`, configure
+the Supabase email-code template, then recreate the app. See the full
+[Supabase implementation guide](docs/supabase-implementation.md) for architecture,
+flow diagrams, setup, code changes, and manual test steps. Supabase stores
+authentication identities; profiles and loan data remain in local PostgreSQL.
+Set `UDHAAR_AUTH_PROVIDER=local` explicitly to use the earlier password-based
+development mode. There is no automatic fallback between modes.
 
 Run the API suite against PostgreSQL (each test uses a temporary isolated schema):
 
@@ -71,7 +77,8 @@ Run a real HTTP smoke test against the running app:
 python scripts/smoke_test.py http://localhost:8000
 ```
 
-The smoke test creates a test account and a completed loan, retained for inspection.
+The password smoke test requires local authentication mode. It creates a test account
+and a completed loan, retained for inspection.
 It covers registration, login/logout, anonymous handover acknowledgment, return
 acknowledgment, and private-note isolation.
 
@@ -118,7 +125,7 @@ Then open **http://127.0.0.1:8000** and create an account. You can add your firs
 | Backend | FastAPI (Python), JSON REST endpoints |
 | Database | SQLAlchemy models, SQLite for local development |
 | Frontend | Responsive HTML + vanilla JavaScript + CSS; no build step |
-| Authentication | Argon2 password hashing, randomly generated and hashed database-backed session tokens, HTTP-only cookies, CSRF double-submit validation |
+| Authentication | Supabase email OTP with server validation, HTTP-only token cookies, local identity mapping, CSRF checks; optional legacy local password mode |
 | Sharing | Opaque random bearer invitation token; only its SHA-256 hash is stored |
 | Optional later database | PostgreSQL via `UDHAAR_DATABASE_URL` with `requirements-postgres.txt` |
 
