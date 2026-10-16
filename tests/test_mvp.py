@@ -1,27 +1,45 @@
 """Run: pytest -q tests — validates permissions, acknowledgment and returns."""
+import os
+import uuid
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 from backend.main import app, get_db
 from backend.models import Base
 
 @pytest.fixture
 def setup(tmp_path):
-    engine = create_engine(f'sqlite:///{tmp_path / "test.sqlite3"}', connect_args={'check_same_thread':False})
+    test_url = os.getenv('TEST_DATABASE_URL')
+    schema = None
+    if test_url:
+        engine = create_engine(test_url)
+        assert engine.dialect.name == 'postgresql', 'TEST_DATABASE_URL must use PostgreSQL'
+        schema = 'test_' + uuid.uuid4().hex
+        with engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        engine = engine.execution_options(schema_translate_map={None: schema})
+    else:
+        engine = create_engine(f'sqlite:///{tmp_path / "test.sqlite3"}', connect_args={'check_same_thread':False})
     Base.metadata.create_all(engine)
     sf = sessionmaker(bind=engine, expire_on_commit=False)
     def db():
         with sf() as session:
             yield session
     app.dependency_overrides[get_db] = db
-    with TestClient(app) as owner, TestClient(app) as guest, TestClient(app) as stranger:
-        owner.get('/api/csrf')
-        guest.get('/api/csrf')
-        stranger.get('/api/csrf')
-        yield owner, guest, stranger
-    app.dependency_overrides.clear()
-    engine.dispose()
+    try:
+        with TestClient(app) as owner, TestClient(app) as guest, TestClient(app) as stranger:
+            owner.get('/api/csrf')
+            guest.get('/api/csrf')
+            stranger.get('/api/csrf')
+            yield owner, guest, stranger
+    finally:
+        app.dependency_overrides.clear()
+        if schema:
+            with engine.begin() as connection:
+                connection.execute(DropSchema(schema, cascade=True))
+        engine.dispose()
 
 def post(client, url, payload):
     return client.post(url, json=payload, headers={'X-CSRF-Token':client.cookies.get('udhaar_csrf', '')})
@@ -133,3 +151,56 @@ def test_invalid_due_date_and_return_limits(setup):
     assert post(owner,'/api/records',data).status_code==422
     data['due_date']='2026-10-25';data['quantity']=0
     assert post(owner,'/api/records',data).status_code==422
+
+
+def test_signup_link_and_anonymous_loan_completion(setup):
+    owner, guest, other_holder = setup
+    signup = guest.get('/signup')
+    assert signup.status_code == 200
+    assert '/static/app.js' in signup.text
+    account(owner, 'Alex', 'alex@example.com')
+    record = create_record(owner, mode='ON')
+    path = invite(owner, record['id'])
+    assert guest.get('/api/me').status_code == 401
+    accept(guest, path)
+    # Link access belongs to the holder, not the browser that acknowledged it.
+    assert other_holder.get('/api/me').status_code == 401
+    response = post(other_holder, f'/api{path}/returns', {'quantity': 2})
+    assert response.status_code == 200
+    proposed = response.json()
+    assert proposed['status'] == 'PENDING'
+    assert post(owner, f"/api/records/{record['id']}/returns/{proposed['id']}/confirm", {}).status_code == 200
+    complete = other_holder.get('/api' + path)
+    assert complete.status_code == 200
+    assert complete.json()['settlement'] == 'RETURNED'
+    assert 'notes' not in complete.json()
+
+
+@pytest.mark.parametrize('direction', ['LENT', 'BORROWED'])
+def test_handover_and_return_acknowledgments_are_separate(setup, direction):
+    owner, guest, _ = setup
+    account(owner, 'Alex', 'alex@example.com')
+    record = create_record(owner, direction=direction, mode='ON', quantity=2)
+    path = invite(owner, record['id'])
+    def state():
+        response = guest.get('/api' + path)
+        assert response.status_code == 200
+        return response.json()
+    assert state()['handover_acknowledgment'] == 'PENDING'
+    assert state()['return_acknowledgment'] == 'NONE'
+    accept(guest, path)
+    assert state()['handover_acknowledgment'] == 'CONFIRMED'
+    assert state()['return_acknowledgment'] == 'NONE'
+    borrower, lender = (guest, owner) if direction == 'LENT' else (owner, guest)
+    borrower_base = '/api' + path if direction == 'LENT' else f"/api/records/{record['id']}"
+    lender_base = f"/api/records/{record['id']}" if direction == 'LENT' else '/api' + path
+    for index in range(2):
+        proposed = post(borrower, borrower_base + '/returns', {'quantity': 1})
+        assert proposed.status_code == 200
+        assert state()['return_acknowledgment'] == 'PENDING'
+        assert state()['handover_acknowledgment'] == 'CONFIRMED'
+        response = post(lender, lender_base + f"/returns/{proposed.json()['id']}/confirm", {})
+        assert response.status_code == 200
+        assert state()['return_acknowledgment'] == ('PARTIAL' if index == 0 else 'CONFIRMED')
+        assert state()['settlement'] == ('PARTIAL' if index == 0 else 'RETURNED')
+        assert state()['handover_acknowledgment'] == 'CONFIRMED'

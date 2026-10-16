@@ -1,0 +1,76 @@
+name: udhaar-local
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: udhaar
+      POSTGRES_DB: udhaar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U udhaar -d udhaar"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      target: runtime
+    environment:
+      UDHAAR_DATABASE_URL: postgresql+psycopg://udhaar:${POSTGRES_PASSWORD}@db:5432/udhaar
+      UDHAAR_COOKIE_SECURE: "false"
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  pgadmin:
+    image: dpage/pgadmin4:9.18
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:?Set PGADMIN_PASSWORD in .env}
+      PGADMIN_DISABLE_POSTFIX: "true"
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=-", "http://127.0.0.1/misc/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      UDHAAR_DATABASE_URL: postgresql+psycopg://udhaar:${POSTGRES_PASSWORD}@db:5432/udhaar
+      TEST_DATABASE_URL: postgresql+psycopg://udhaar:${POSTGRES_PASSWORD}@db:5432/udhaar
+      UDHAAR_COOKIE_SECURE: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  pgadmin_data:

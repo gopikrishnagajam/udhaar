@@ -11,7 +11,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.orm import Session
 
 from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, now
@@ -117,7 +117,13 @@ def summary(rec: Record):
     left = rec.item.quantity - confirmed
     return {
         'id': rec.id, 'kind': rec.kind, 'direction': rec.direction, 'mode': rec.mode,
-        'acknowledgment': rec.acknowledgment, 'contact_name': rec.contact.name,
+        'acknowledgment': rec.acknowledgment,
+        'handover_acknowledgment': rec.acknowledgment,
+        'return_acknowledgment': ('NOT_REQUIRED' if rec.mode == 'OFF' else
+                                  'CONFIRMED' if left == 0 else
+                                  'PENDING' if pending else
+                                  'PARTIAL' if confirmed else 'NONE'),
+        'contact_name': rec.contact.name,
         'item_name': rec.item.item_name, 'category': rec.item.category, 'quantity': rec.item.quantity,
         'loan_date': rec.loan_date.isoformat(), 'due_date': rec.due_date.isoformat() if rec.due_date else None,
         'notes': rec.notes, 'returned_quantity': confirmed, 'pending_quantity': pending,
@@ -140,7 +146,7 @@ def detail(rec: Record):
 def invited(db: Session, token: str):
     inv = db.scalar(select(Invitation).where(Invitation.token_hash == digest(token)))
     if not inv or inv.state not in {'PENDING', 'ACCEPTED'} or utc(inv.expires_at) <= now():
-        raise HTTPException(404, 'Invitation unavailable or expired')
+        raise HTTPException(404, 'Loan link unavailable or expired')
     rec = db.get(Record, inv.record_id)
     if not rec or rec.mode != 'ON':
         raise HTTPException(404, 'Record unavailable')
@@ -163,7 +169,7 @@ def add_return(db: Session, rec: Record, qty: int, actor: str):
                              confirmed_at=now() if is_confirmed else None)
     db.add(item_return)
     event(db, rec, actor, 'RETURN_CONFIRMED' if is_confirmed else 'RETURN_PROPOSED',
-          f'{qty} item(s) marked returned' if is_confirmed else f'Return requested for {qty} item(s)')
+          f'Return acknowledged for {qty} item(s)' if is_confirmed else f'Return requested for {qty} item(s)')
     db.commit()
     return {'id': item_return.id, 'status': item_return.status}
 
@@ -176,7 +182,7 @@ def confirm_return(db: Session, rec: Record, r: ItemReturn, actor: str):
     r.status = 'CONFIRMED'
     r.confirmed_by = actor
     r.confirmed_at = now()
-    event(db, rec, actor, 'RETURN_CONFIRMED', f'Return of {r.quantity} item(s) confirmed')
+    event(db, rec, actor, 'RETURN_CONFIRMED', f'Return acknowledged for {r.quantity} item(s)')
     db.commit()
     return {'status': 'CONFIRMED'}
 
@@ -274,7 +280,7 @@ def record_details(record_id: str, user: User = Depends(auth_user), db: Session 
 def edit_record(record_id: str, body: RecordEdit, user: User = Depends(auth_user), db: Session = Depends(get_db)):
     rec = get_owned(db, user, record_id)
     if rec.mode == 'ON' and rec.acknowledgment != 'NONE':
-        raise HTTPException(409, 'Shared records cannot be edited after invitations; create a new record for changed terms')
+        raise HTTPException(409, 'Shared records cannot be edited after sharing; create a new record for changed terms')
     if body.item_name is not None:
         if not body.item_name.strip():
             raise HTTPException(422, 'Item name cannot be blank')
@@ -301,7 +307,7 @@ def create_invitation(record_id: str, user: User = Depends(auth_user), db: Sessi
     db.add(invitation)
     rec.mode = 'ON'
     rec.acknowledgment = 'PENDING'
-    event(db, rec, 'OWNER', 'INVITED', 'Invitation link created (not yet acknowledged)')
+    event(db, rec, 'OWNER', 'INVITED', 'Loan link created (not yet acknowledged)')
     db.commit()
     return {'path': f'/share/{raw}', 'expires_at': invitation.expires_at.isoformat(), 'status': 'PENDING'}
 
@@ -335,11 +341,12 @@ def public_invite(token: str, db: Session = Depends(get_db)):
 def respond(token: str, body: ShareResponse, db: Session = Depends(get_db)):
     inv, rec = invited(db, token)
     if inv.state != 'PENDING' or rec.acknowledgment != 'PENDING':
-        raise HTTPException(409, 'Invitation already answered')
+        raise HTTPException(409, 'Loan link already answered')
     if body.accept:
         inv.state = 'ACCEPTED'
         rec.acknowledgment = 'CONFIRMED'
-        event(db, rec, 'GUEST', 'ACKNOWLEDGED', 'Recipient acknowledged using shared link (identity unverified)')
+        handover = 'Item taken / borrowed' if rec.direction == 'LENT' else 'Item given / lent'
+        event(db, rec, 'GUEST', 'ACKNOWLEDGED', f'{handover} acknowledged through loan link (identity unverified)')
     else:
         inv.state = 'DECLINED'
         rec.acknowledgment = 'DECLINED'
@@ -364,10 +371,15 @@ def guest_confirm(token: str, return_id: str, db: Session = Depends(get_db)):
     return confirm_return(db, rec, item_return, 'GUEST')
 
 @app.get('/api/health')
-def health():
+def health(db: Session = Depends(get_db)):
+    try:
+        db.execute(text('SELECT 1'))
+    except Exception:
+        raise HTTPException(503, 'Database unavailable') from None
     return {'ok': True, 'app': 'udhaar'}
 
 @app.get('/')
+@app.get('/signup')
 @app.get('/share/{token}')
 def frontend(token: str = ''):
     return FileResponse(ROOT / 'static' / 'index.html')

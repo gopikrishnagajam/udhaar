@@ -15,7 +15,78 @@ This is a **working local MVP**, not a deployment-ready commercial product. It t
 - Invitation links expire after 30 days. Generating a replacement revokes prior links and requires fresh acknowledgment.
 - Per-account authorization and CSRF checks; 5 automated API test scenarios.
 
-## Quick start
+## Local Docker + PostgreSQL (recommended)
+
+Start Docker Desktop using Linux containers. On first setup, copy `.env.example`
+to `.env` and replace `POSTGRES_PASSWORD` and `PGADMIN_PASSWORD` with separate random URL-safe passwords. If
+`.env` already exists, keep it and add any missing Compose variables.
+
+```powershell
+docker compose up --build -d --wait
+docker compose ps
+```
+
+Open **http://localhost:8000**. Compose builds the Python app with the PostgreSQL
+driver, waits for PostgreSQL to be healthy, and creates the application tables on
+the first startup. `/api/health` checks the application's database connection.
+Both ports are bound to localhost: app `8000`, PostgreSQL `5432`. Change `APP_PORT`
+or `POSTGRES_PORT` in `.env` if needed. Inside Compose, the database host is `db`.
+
+### Inspect PostgreSQL with pgAdmin
+
+Compose also starts **pgAdmin at http://localhost:5050**, bound to localhost.
+Sign in with `PGADMIN_EMAIL` (default `admin@example.com`) and `PGADMIN_PASSWORD`
+from your local `.env`. Change `PGADMIN_PORT` if port 5050 is in use.
+
+The **Docker > Udhaar local PostgreSQL** server is already registered. Open it
+and enter `POSTGRES_PASSWORD` from `.env` when prompted for the database password.
+This is separate from your pgAdmin login password. Select **Databases > udhaar**:
+
+- **Schemas > public > Tables** contains the application tables. Right-click a
+  table and select **View/Edit Data > All Rows** to inspect its records.
+- **Dashboard** shows database activity and connections.
+- **Tools > Query Tool** lets you run SQL, for example `SELECT * FROM records;`.
+
+pgAdmin settings persist in the separate `pgadmin_data` volume. Its login settings
+initialize on first launch; changing `.env` later does not reset an existing login.
+Database host `db` works inside the Docker network; desktop database clients use
+`localhost` with `POSTGRES_PORT` instead.
+
+### Data and tests
+
+Data lives in the `postgres_data` named volume and survives container restart,
+recreation, and `docker compose down`. This starts a separate database: existing
+`udhaar.sqlite3` data is not imported. This setup uses the current local password
+authentication; Supabase integration will be a separate step.
+
+Run the API suite against PostgreSQL (each test uses a temporary isolated schema):
+
+```powershell
+docker compose --profile test run --build --rm tests
+```
+
+Run a real HTTP smoke test against the running app:
+
+```powershell
+python scripts/smoke_test.py http://localhost:8000
+```
+
+The smoke test creates a test account and a completed loan, retained for inspection.
+It covers registration, login/logout, anonymous handover acknowledgment, return
+acknowledgment, and private-note isolation.
+
+```powershell
+docker compose logs --tail 50 app db
+docker compose exec db psql -U udhaar -d udhaar
+docker compose down
+```
+
+Avoid `docker compose down -v` unless you intend to delete the local database.
+`POSTGRES_PASSWORD` initializes a new volume; changing it later in `.env` does not
+change an existing database password. Application schema changes still need
+migrations before production; `create_all` only creates missing tables.
+
+## Quick start without Docker (SQLite)
 
 Requires **Python 3.10+**. Run the following from this folder:
 
@@ -119,3 +190,16 @@ udhaar_mvp/
 ```
 
 Built as an implementation of our October 2026 Udhaar product conversation.
+
+## Simple sharing
+
+- **Loan links** (`/share/<token>`): anyone holding the link can view and acknowledge the loan without an account, then revisit the same link for returns. The sender is responsible for sharing with the right person; identity is not verified. Borrowers report returns and lenders confirm receipt. Private notes remain hidden. Links expire after 30 days; replacing one invalidates the previous link and requires fresh acknowledgment.
+- **App invitations** (`/signup`): use **Invite friends** in the dashboard to copy the signup URL and send it through a messaging app. There is no invitation tracking or automatic delivery.
+- Open the app at an address recipients can reach before copying links. Localhost links only work on the sender's computer; LAN IP links require access to that network.
+
+### Two separate acknowledgments
+
+1. **Handover**: the loan-link holder acknowledges "I took / borrowed this item" when the owner lent it, or "I gave / lent this item" when the owner borrowed it.
+2. **Return / completion**: the lender acknowledges receipt of returned items. A borrower reporting a return leaves it pending until the lender acknowledges. Partial returns do not complete the loan; all quantities must be confirmed. The handover acknowledgment remains recorded independently.
+
+The API exposes `handover_acknowledgment` and `return_acknowledgment` separately. The existing `acknowledgment` field remains an alias for handover. Return acknowledgment is derived from the saved return records; no extra database migration is needed. Both stages use the same loan link within its existing expiry.

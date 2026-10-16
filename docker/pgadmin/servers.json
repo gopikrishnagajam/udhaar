@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Udhaar local PostgreSQL",
+      "Group": "Docker",
+      "Host": "db",
+      "Port": 5432,
+      "MaintenanceDB": "udhaar",
+      "Username": "udhaar",
+      "SSLMode": "prefer"
+    }
+  }
+}
