@@ -18,7 +18,7 @@ This is a **working local MVP**, not a deployment-ready commercial product. It t
 ## Local Docker + PostgreSQL (recommended)
 
 Start Docker Desktop using Linux containers. On first setup, copy `.env.example`
-to `.env` and replace `POSTGRES_PASSWORD` with a random URL-safe password. If
+to `.env` and replace `POSTGRES_PASSWORD` and `PGADMIN_PASSWORD` with separate random URL-safe passwords. If
 `.env` already exists, keep it and add any missing Compose variables.
 
 ```powershell
@@ -31,6 +31,28 @@ driver, waits for PostgreSQL to be healthy, and creates the application tables o
 the first startup. `/api/health` checks the application's database connection.
 Both ports are bound to localhost: app `8000`, PostgreSQL `5432`. Change `APP_PORT`
 or `POSTGRES_PORT` in `.env` if needed. Inside Compose, the database host is `db`.
+
+### Inspect PostgreSQL with pgAdmin
+
+Compose also starts **pgAdmin at http://localhost:5050**, bound to localhost.
+Sign in with `PGADMIN_EMAIL` (default `admin@example.com`) and `PGADMIN_PASSWORD`
+from your local `.env`. Change `PGADMIN_PORT` if port 5050 is in use.
+
+The **Docker > Udhaar local PostgreSQL** server is already registered. Open it
+and enter `POSTGRES_PASSWORD` from `.env` when prompted for the database password.
+This is separate from your pgAdmin login password. Select **Databases > udhaar**:
+
+- **Schemas > public > Tables** contains the application tables. Right-click a
+  table and select **View/Edit Data > All Rows** to inspect its records.
+- **Dashboard** shows database activity and connections.
+- **Tools > Query Tool** lets you run SQL, for example `SELECT * FROM records;`.
+
+pgAdmin settings persist in the separate `pgadmin_data` volume. Its login settings
+initialize on first launch; changing `.env` later does not reset an existing login.
+Database host `db` works inside the Docker network; desktop database clients use
+`localhost` with `POSTGRES_PORT` instead.
+
+### Data and tests
 
 Data lives in the `postgres_data` named volume and survives container restart,
 recreation, and `docker compose down`. This starts a separate database: existing
