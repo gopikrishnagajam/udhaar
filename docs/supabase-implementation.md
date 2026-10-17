@@ -1,5 +1,8 @@
 # Supabase authentication in Udhaar
 
+For a learning-oriented explanation of the whole application, including loan
+acknowledgments and database tables, see [Understanding the setup](understanding-the-setup.md).
+
 ## Purpose and scope
 
 Udhaar uses hosted Supabase Auth to verify users through email one-time codes.

@@ -2,6 +2,10 @@
 
 **Udhaar** is a responsive lending-and-borrowing tracker: "Lend it. Track it. Get it back."
 
+For a guided explanation of the working system, read
+[Understanding the setup](docs/understanding-the-setup.md): authentication, token
+storage, database tables, loan acknowledgments, Docker, pgAdmin, and Mailtrap.
+
 This is a **working local MVP**, not a deployment-ready commercial product. It tracks **physical items** first while keeping a shared `Record` / item-specific `ItemLoan` model suitable for a future `MoneyLoan`. The current package has **no AI features, payment features, product recommendations, data resale, or analytics tracking**.
 
 ## What is included
