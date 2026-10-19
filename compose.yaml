@@ -18,6 +18,17 @@ services:
       retries: 12
       start_period: 10s
 
+  migrate:
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "backend.migrate", "upgrade"]
+    environment:
+      UDHAAR_DATABASE_URL: postgresql+psycopg://udhaar:${POSTGRES_PASSWORD}@db:5432/udhaar
+    depends_on:
+      db:
+        condition: service_healthy
+
   app:
     build:
       context: .
@@ -33,6 +44,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 5s

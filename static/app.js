@@ -32,15 +32,7 @@ async function requestOtpCode() {
  }
 }
 
-async function api(path, options = {}, retried = false) {
-  const resp = await fetch(path, {credentials:'same-origin', ...options, headers: {...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.method && options.method !== 'GET' ? {'X-CSRF-Token':csrf} : {}), ...(options.headers || {})}});
-  if(resp.status===401 && !retried && authConfig.provider==='supabase' && authConfig.has_session && (path==='/api/me'||path.startsWith('/api/records'))) {
-    if(!refreshPromise) refreshPromise=fetch('/api/auth/refresh',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf}}).finally(()=>{refreshPromise=null});
-    const refreshed=await refreshPromise;
-    if(refreshed.ok) return api(path,options,true);
-    if(refreshed.status===401) authConfig.has_session=false;
-    if(refreshed.status>=500) throw new Error('Sign-in service unavailable. Please retry.');
-  }
+async function readApiResponse(resp) {
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const details = Array.isArray(body.detail) ? body.detail.map(d=>d.msg).join('; ') : body.detail;
@@ -50,6 +42,34 @@ async function api(path, options = {}, retried = false) {
     throw error;
   }
   return body;
+}
+function clearSignedInState() {
+  authConfig.has_session=false;user=null;records=[];activeRecord=null;shareLink='';tab='ALL';otpSent=false;authName='';notice='';
+  $$('.modal-backdrop, .toast').forEach(el=>el.remove());
+}
+function sessionExpired() {
+  clearSignedInState();
+  authScreen('Your session expired. Please sign in again.');
+}
+async function api(path, options = {}, retried = false) {
+  const resp = await fetch(path, {credentials:'same-origin', ...options, headers: {...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.method && options.method !== 'GET' ? {'X-CSRF-Token':csrf} : {}), ...(options.headers || {})}});
+  const protectedRequest=path==='/api/me'||path==='/api/records'||path.startsWith('/api/records/');
+  if(resp.status===401 && authConfig.provider==='supabase' && protectedRequest) {
+    if(!retried && authConfig.has_session) {
+      // Share the parsed result too: a Response body can only be consumed once.
+      if(!refreshPromise) refreshPromise=fetch('/api/auth/refresh',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf}}).then(readApiResponse).finally(()=>{refreshPromise=null});
+      try {await refreshPromise;}
+      catch(error) {
+        if(error.status===401) sessionExpired();
+        if(error.status>=500) error.message='Sign-in service unavailable. Please retry.';
+        if(error.status===429 && error.retryAfter) error.message=`Authentication limit reached. Try again in ${error.retryAfter} seconds.`;
+        throw error;
+      }
+      return api(path,options,true);
+    }
+    sessionExpired();
+  }
+  return readApiResponse(resp);
 }
 function send(path, data, method='POST') { return api(path, {method, body:JSON.stringify(data)}); }
 function toast(text) { notice = text; renderNotice(); setTimeout(() => {if (notice===text) {notice='';renderNotice()}}, 4400); }
@@ -96,8 +116,8 @@ function acknowledgmentSummary(r) {
  const returned={NONE:'Not returned yet',PENDING:'Awaiting lender acknowledgment',PARTIAL:'Partial return acknowledged',CONFIRMED:'All returned / completed'};
  return `<div class="detail-summary"><div><small>1. Item taken / given</small><strong class="small-strong">${handover[r.handover_acknowledgment]||handover[r.acknowledgment]}</strong></div><div><small>2. Returned / completed</small><strong class="small-strong">${returned[r.return_acknowledgment]||returned.NONE}</strong></div></div>`;
 }
-function authScreen() {
- if(authConfig.provider==='supabase') {supabaseAuthScreen();return;}
+function authScreen(message='', recovery=null) {
+ if(authConfig.provider==='supabase') {supabaseAuthScreen(message,recovery);return;}
  $('#app').innerHTML = `<div class="auth-wrap">
  <section class="auth-intro"><div class="brand brand-light"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
  <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>That book you borrowed. The charger you lent. The things you meant to get back. All in one calm place.</p></div>
@@ -112,7 +132,7 @@ function authScreen() {
  $('#switch-auth').onclick=()=>{signup=!signup;authScreen()};
  $('#auth-form').onsubmit=async e=>{e.preventDefault();const btn=$('#auth-form button[type=submit]');btn.disabled=true;const d=Object.fromEntries(new FormData(e.target));try {user=await send(signup?'/api/register':'/api/login',d);await loadRecords();}catch(err){$('#auth-error').textContent=err.message}finally{btn.disabled=false}};
 }
-function supabaseAuthScreen() {
+function supabaseAuthScreen(message='', recovery=null) {
  $('#app').innerHTML=`<div class="auth-wrap">
  <section class="auth-intro"><div class="brand brand-light"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
  <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>A simple place for the things you lend and borrow.</p></div></section>
@@ -121,11 +141,19 @@ function supabaseAuthScreen() {
  <p>${otpSent?`Enter the sign-in code sent to ${esc(authEmail)}.`:'We will email you a one-time code. No password needed.'}</p>
  ${!authConfig.configured?'<p class="form-error" role="alert">Email sign-in is not configured yet. Ask the app administrator to complete setup.</p>':''}
  <form id="otp-form">${otpSent?'<label>Sign-in code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" minlength="6" maxlength="10" autofocus /></label>':`${signup?`<label>Your name<input name="name" required maxlength="100" autocomplete="name" value="${esc(authName)}" /></label>`:''}<label>Email address<input name="email" type="email" required maxlength="255" autocomplete="email" value="${esc(authEmail)}" /></label>`}
- <button class="btn btn-primary full" type="submit" ${!authConfig.configured?'disabled':''}>${otpSent?'Verify and continue':'Send sign-in code'} ${icon('arrow',18)}</button><p class="form-error" id="otp-error" role="alert"></p></form>
+ <button class="btn btn-primary full" type="submit" ${!authConfig.configured?'disabled':''}>${otpSent?'Verify and continue':'Send sign-in code'} ${icon('arrow',18)}</button><p class="form-error" id="otp-error" role="alert">${esc(message)}</p></form>
+ ${recovery?'<button id="retry-session" class="btn btn-secondary full">Retry session</button>':''}
  <div class="auth-switch">${otpSent?'<button id="change-email">Change email</button> <button id="resend-code" disabled>Resend code</button> ':''}<span>${signup?'Already have an account?':'New to Udhaar?'}</span> <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>
  <div class="auth-note">Your personal records stay private unless you share a loan link.</div></div></section></div>`;
  $('#switch-auth')?.addEventListener('click',()=>{if(authSubmitting)return;signup=!signup;otpSent=false;authScreen()});
  $('#change-email')?.addEventListener('click',()=>{if(authSubmitting)return;otpSent=false;authScreen()});
+ const retry=$('#retry-session');
+ if(retry){
+  const deadline=Date.now()+(recovery.status===429?recovery.retryAfter||60:0)*1000;
+  const update=()=>{const remaining=Math.max(0,Math.ceil((deadline-Date.now())/1000));retry.disabled=remaining>0;retry.textContent=remaining?`Retry session in ${remaining}s`:'Retry session';};
+  update();const timer=setInterval(()=>{if(!retry.isConnected){clearInterval(timer);return}update()},250);
+  retry.onclick=()=>window.location.reload();
+ }
  const resend=$('#resend-code');
  if(resend){resend.onclick=async()=>{if(authSubmitting||resend.disabled)return;authSubmitting=true;updateOtpControls();try{await requestOtpCode();toast('If eligible, another code has been sent.')}catch(err){$('#otp-error').textContent=err.message}finally{authSubmitting=false;updateOtpControls()}};}
  const form=$('#otp-form');
@@ -150,7 +178,7 @@ function topLayout(content) {
  </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark">${icon('package',19)}</span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
  $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render()});
  $('#invite-friends').onclick=()=>showSignupShare();
- $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});authConfig.has_session=false;user=null;records=[];activeRecord=null;otpSent=false;authName='';authScreen()}catch(err){toast(err.message)}};
+ $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});clearSignedInState();authScreen()}catch(err){toast(err.message)}};
  $('#toggle-nav')?.addEventListener('click',()=>$('#sidebar').classList.toggle('sidebar-open'));
 }
 function dashboard() {
@@ -271,6 +299,9 @@ async function guestPage(token){
  if(guestMatch){await guestPage(guestMatch[1]);return}
  authConfig=await api('/api/auth/config');
  if(authConfig.provider==='supabase'&&!authConfig.has_session){authScreen();return}
- try{user=await api('/api/me');await loadRecords()}catch{authScreen()}
+ try{user=await api('/api/me');await loadRecords()}catch(error){
+  user=null;records=[];activeRecord=null;
+  authScreen(error.status===401?'Your session expired. Please sign in again.':error.message,error.status===401?null:error);
+ }
  }catch(e){$('#app').innerHTML=`<div class="loading-screen">Could not start Udhaar: ${esc(e.message)}. Refresh to retry.</div>`}
 })();

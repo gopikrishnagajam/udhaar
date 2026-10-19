@@ -4,6 +4,12 @@ This guide explains the current implementation, updated on October 19, 2026.
 The user has reported that the live flow works. For installation steps and a
 file-by-file implementation reference, use [the Supabase implementation document](supabase-implementation.md).
 
+The diagrams below describe the local Docker environment. A separate
+[Supabase database guide](supabase-database.md) covers the hosted staging stack,
+which moves application data to a private Supabase PostgreSQL schema while
+keeping the same authentication and loan flows. Database setup now uses Alembic
+migrations in both environments.
+
 ## Reading map
 
 1. [The components and their jobs](#the-components-and-their-jobs)
@@ -448,8 +454,8 @@ against accidental data edits or volume loss.
 Compose reads `.env` and passes selected values to each service. Updating an app
 environment variable requires container recreation. Updating Supabase SMTP or
 email templates is remote configuration and does not require a Docker restart.
-This project uses `create_all` to create missing tables; existing table changes
-still need a migration strategy before production.
+Alembic migrations now create and update tables before the app starts. The web
+process only checks that the configured database is at the expected revision.
 
 ## Mailtrap and the email failure
 

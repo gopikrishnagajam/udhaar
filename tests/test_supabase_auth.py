@@ -73,6 +73,9 @@ def remote(setup, monkeypatch):
             return httpx.Response(200, json={'access_token': access, 'refresh_token': refresh, 'expires_in': 3600})
         if path.endswith('/logout'):
             assert request.url.params['scope'] == 'local'
+            token = request.headers.get('authorization', '').removeprefix('Bearer ')
+            if token not in state['tokens'] or token in state['expired']:
+                return httpx.Response(403, json={'error_code': 'bad_jwt', 'msg': 'Invalid or expired JWT'})
             return httpx.Response(204)
         raise AssertionError('Unexpected provider endpoint')
 
@@ -216,6 +219,54 @@ def test_provider_outage_does_not_interrupt_locally_validated_requests(remote):
     assert owner.get('/api/me').status_code == 200
     state['clock'] += 61
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 503
+
+
+@pytest.mark.parametrize('valid_refresh', [True, False])
+def test_logout_retries_rejected_access_with_refresh_and_always_clears_cookies(remote, valid_refresh):
+    (owner, _, _), state = remote
+    signin(owner)
+    expired = state['mint'](state['users']['alex@example.com'], exp=int(time.time()) - 10)
+    owner.cookies.set(auth.ACCESS_COOKIE, expired, domain='testserver.local', path='/')
+    state['expired'].add(expired)
+    if not valid_refresh:
+        state['refresh'].clear()
+    state['requests'].clear()
+
+    result = post(owner, '/api/auth/logout')
+
+    assert result.status_code == 200
+    assert result.json()['provider_session_revoked'] is valid_refresh
+    assert [request[1] for request in state['requests']] == (
+        ['/auth/v1/logout', '/auth/v1/token', '/auth/v1/logout'] if valid_refresh
+        else ['/auth/v1/logout', '/auth/v1/token'])
+    assert not owner.cookies.get(auth.ACCESS_COOKIE)
+    assert not owner.cookies.get(auth.REFRESH_COOKIE)
+    assert owner.get('/api/me').status_code == 401
+    # A refresh performed only for logout must never issue new browser tokens.
+    assert all('Max-Age=0' in value for value in result.headers.get_list('set-cookie'))
+
+
+def test_logout_uses_refresh_when_access_cookie_has_expired_from_browser(remote):
+    (owner, _, _), state = remote
+    signin(owner)
+    owner.cookies.delete(auth.ACCESS_COOKIE)
+    state['requests'].clear()
+    result = post(owner, '/api/auth/logout')
+    assert result.json()['provider_session_revoked'] is True
+    assert [request[1] for request in state['requests']] == ['/auth/v1/token', '/auth/v1/logout']
+    assert not owner.cookies.get(auth.REFRESH_COOKIE)
+
+
+def test_logout_outage_does_not_trigger_a_refresh_retry(remote):
+    (owner, _, _), state = remote
+    signin(owner)
+    state['offline'] = True
+    state['requests'].clear()
+    result = post(owner, '/api/auth/logout')
+    assert result.json()['provider_session_revoked'] is False
+    assert [request[1] for request in state['requests']] == ['/auth/v1/logout']
+    assert not owner.cookies.get(auth.ACCESS_COOKIE)
+    assert not owner.cookies.get(auth.REFRESH_COOKIE)
 
 
 def test_email_delivery_failure_is_actionable_without_leaking_provider_details(remote, caplog):

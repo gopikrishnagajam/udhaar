@@ -5,6 +5,8 @@
 For a guided explanation of the working system, read
 [Understanding the setup](docs/understanding-the-setup.md): authentication, token
 storage, database tables, loan acknowledgments, Docker, pgAdmin, and Mailtrap.
+For hosted PostgreSQL, migrations, and staging commands, read the
+[Supabase database guide](docs/supabase-database.md).
 
 This is a **working local MVP**, not a deployment-ready commercial product. It tracks **physical items** first while keeping a shared `Record` / item-specific `ItemLoan` model suitable for a future `MoneyLoan`. The current package has **no AI features, payment features, product recommendations, data resale, or analytics tracking**.
 
@@ -31,8 +33,8 @@ docker compose ps
 ```
 
 Open **http://localhost:8000**. Compose builds the Python app with the PostgreSQL
-driver, waits for PostgreSQL to be healthy, and creates the application tables on
-the first startup. `/api/health` checks the application's database connection.
+driver, waits for PostgreSQL to be healthy, and runs the migration service before
+starting the app. `/api/health` checks the application's database connection.
 Both ports are bound to localhost: app `8000`, PostgreSQL `5432`. Change `APP_PORT`
 or `POSTGRES_PORT` in `.env` if needed. Inside Compose, the database host is `db`.
 
@@ -94,8 +96,11 @@ docker compose down
 
 Avoid `docker compose down -v` unless you intend to delete the local database.
 `POSTGRES_PASSWORD` initializes a new volume; changing it later in `.env` does not
-change an existing database password. Application schema changes still need
-migrations before production; `create_all` only creates missing tables.
+change an existing database password. Schema changes now use Alembic migrations.
+For an older unversioned database, back it up and run
+`docker compose run --build --rm migrate python -m backend.migrate baseline`
+once before starting the updated stack. See the database guide for validation
+and hosted staging; the two Compose stacks keep separate application data.
 
 ## Quick start without Docker (SQLite)
 
@@ -107,10 +112,11 @@ python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python -m backend.migrate upgrade
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Then open **http://127.0.0.1:8000** and create an account. You can add your first item right away; no frontend build, Node.js, or external API key is needed. The app creates `udhaar.sqlite3` automatically and keeps the records across restarts. API documentation is at `http://127.0.0.1:8000/api/docs`.
+Then open **http://127.0.0.1:8000** and create an account. You can add your first item right away; no frontend build, Node.js, or external API key is needed. The migration command initializes `udhaar.sqlite3`, which keeps records across restarts. Existing unversioned databases need a backup and `python -m backend.migrate baseline` before upgrading. API documentation is at `http://127.0.0.1:8000/api/docs`.
 
 ### Try the hybrid workflow
 
@@ -127,11 +133,11 @@ Then open **http://127.0.0.1:8000** and create an account. You can add your firs
 | Layer | Implementation |
 |---|---|
 | Backend | FastAPI (Python), JSON REST endpoints |
-| Database | SQLAlchemy models, SQLite for local development |
+| Database | SQLAlchemy + Alembic; Docker PostgreSQL locally, Supabase PostgreSQL for hosted staging, optional local SQLite |
 | Frontend | Responsive HTML + vanilla JavaScript + CSS; no build step |
 | Authentication | Supabase email OTP with server validation, HTTP-only token cookies, local identity mapping, CSRF checks; optional legacy local password mode |
 | Sharing | Opaque random bearer invitation token; only its SHA-256 hash is stored |
-| Optional later database | PostgreSQL via `UDHAAR_DATABASE_URL` with `requirements-postgres.txt` |
+| Hosted database | Supabase Session pooler via `compose.supabase.yaml`; private `udhaar` schema |
 
 **Why not Django/React yet?** The agreed early design suggested Django REST Framework + React/TypeScript. For this runnable artifact we used a lightweight server and no-build frontend, since this execution environment cannot fetch those dependencies. This is a pragmatic MVP implementation, not a change to the product architecture commitment. A Django/React production rebuild can preserve the same models, lifecycle and REST API semantics.
 
@@ -168,12 +174,25 @@ python -m pytest -q tests
 
 Tests cover privacy/isolation, acknowledgment, duplicate response rejection, lender-only confirmation, partial returns, outstanding-quantity safeguards, link revocation, declined invitations, invalid dates and CSRF protection.
 
+Session browser regressions (Node.js 20+, installed Microsoft Edge, and the Docker
+app running) are available separately:
+
+```powershell
+npm ci --prefix tests/browser
+npm test --prefix tests/browser
+```
+
+These checks exercise the real frontend with simulated session responses and an
+anonymous live-server check. They send no email. See the
+[authentication testing guide](docs/supabase-implementation.md#testing-and-acceptance)
+for coverage, browser configuration, and remaining live-provider checks.
+
 ## Important limits before any public launch
 
 This is a small-group development prototype. Before deployment to untrusted users, add:
 
 - HTTPS, secure cookies (`UDHAAR_COOKIE_SECURE=true`) and correctly configured host/origin restrictions.
-- Proper persistent Postgres migrations (Alembic), database backups, transaction isolation/locking for concurrent returns, and safe operational monitoring.
+- Database backups and restore testing, migration release reviews, transaction isolation/locking for concurrent returns, and safe operational monitoring.
 - Email verification for higher-trust acknowledgment; abuse protection, login rate limiting, account recovery and invitation revocation UI.
 - Thorough accessibility, end-to-end/browser, security, and load testing; privacy policy, data export/deletion flows and retention rules.
 - Invitation-link handling safeguards (they grant bearer access to the specific loan). Sharing identity has not been verified.

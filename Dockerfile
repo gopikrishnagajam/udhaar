@@ -4,6 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY requirements.txt requirements-postgres.txt ./
 RUN pip install --no-cache-dir -r requirements-postgres.txt
 COPY backend ./backend
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY static ./static
 ENV UDHAAR_COOKIE_SECURE=true
 EXPOSE 8000

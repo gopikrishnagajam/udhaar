@@ -1,6 +1,7 @@
 """Udhaar MVP API and its zero-build frontend."""
 import hashlib
 import secrets
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -16,11 +17,17 @@ from sqlalchemy.orm import Session
 
 from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, now
 from . import supabase_auth
+from .migrate import ensure_database_current
 
-app = FastAPI(title='Udhaar MVP', docs_url='/api/docs', openapi_url='/api/openapi.json')
+@asynccontextmanager
+async def lifespan(app):
+    ensure_database_current()
+    yield
+
+
+app = FastAPI(title='Udhaar MVP', docs_url='/api/docs', openapi_url='/api/openapi.json', lifespan=lifespan)
 ROOT = Path(__file__).resolve().parent.parent
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
-Base.metadata.create_all(bind=engine)
 ph = PasswordHasher()
 
 class Credentials(BaseModel):

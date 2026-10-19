@@ -11,10 +11,12 @@ application profiles, contacts, loans, shared links, acknowledgments, and return
 The same Docker Compose stack also runs pgAdmin for inspection.
 
 Supabase necessarily stores authentication identities and session information in
-its own project database. This integration does not use Supabase's application
-tables, Storage, or Data API. Display names are stored locally, not sent as user
-metadata. Only the email and authentication credentials needed for sign-in go to
-Supabase. See [Supabase Auth](https://supabase.com/docs/guides/auth).
+its own project database. The default local stack keeps application data in
+Docker PostgreSQL. The separate [hosted database setup](supabase-database.md)
+stores application data in Supabase's private `udhaar` schema through SQLAlchemy.
+Neither setup uses Storage or the Data API. Display names are application data,
+not Auth user metadata. Only email and authentication credentials go to the Auth
+endpoints. See [Supabase Auth](https://supabase.com/docs/guides/auth).
 
 Loan-link guests do not need an account. They still acknowledge handover and
 returns through the existing expiring bearer link. This document describes
@@ -166,7 +168,9 @@ flowchart TD
     B -->|401| D[Frontend requests refresh once with CSRF token]
     D --> E{Refresh accepted and local profile exists?}
     E -->|Yes| F[Set rotated cookies and retry original request once]
-    E -->|No| G[Require sign-in again]
+    E -->|401| G[Clear signed-in UI and require sign-in again]
+    E -->|429| J[Keep retry interval and explain rate limit]
+    E -->|503 or network failure| K[Explain temporary failure and allow retry]
     B -->|Required signing keys unavailable| H[Return 503; no local-auth fallback]
     C --> I[Return authorized data]
 ```
@@ -175,6 +179,13 @@ The frontend shares an in-flight refresh promise within the page so simultaneous
 requests do not each try to rotate the same refresh token. It does not refresh
 anonymous loan-link requests. Session changes in multiple browser tabs still rely
 on the provider's refresh reuse behavior; there is no cross-tab coordination yet.
+
+A rejected refresh clears the signed-in profile, cached records, shared-link
+state, and open dialogs before showing the sign-in form. A temporary failure
+does not mark the session as permanently expired. At startup, the form explains
+the failure and offers **Retry session**, which reloads and rechecks the existing
+cookies without sending an email. A refresh 429 keeps its status and retry
+interval; the startup retry button counts down before it can be used.
 
 | Cookie | Purpose | Browser access | Lifetime and scope |
 |---|---|---|---|
@@ -189,7 +200,9 @@ HTTP-only does not remove the need to prevent script injection and protect CSRF.
 
 Sign-out requests provider revocation with `scope=local`, clears this browser's
 auth cookies, and leaves local profiles and loans intact. If the access cookie
-has expired, sign-out first attempts refresh to obtain a token for revocation.
+is missing or Supabase rejects it, sign-out attempts refresh to obtain a token
+for revocation. It does not retry rate limits or service outages, and does not
+send the temporary tokens from this logout fallback back to the browser.
 During an outage it still clears browser cookies and returns
 `provider_session_revoked: false`. Already-issued access tokens should not be
 assumed instantly unusable after logout; provider token expiration and revocation
@@ -233,10 +246,11 @@ verified sign-in with a colliding email returns 409 and requires an explicit
 future migration. For initial testing, use an email not already used by a legacy
 local profile. Repeated verified logins reuse the same mapped profile.
 
-The new mapping table is created by the existing `create_all` startup mechanism;
-existing tables are not rewritten. Concurrent profile-creation conflicts roll
-back and resolve the existing mapping when possible. Formal versioned schema
-migrations remain a separate production requirement.
+The mapping table is now managed by versioned Alembic migrations. The app checks
+the database revision at startup and does not create tables itself. Existing
+unversioned databases require validated baseline adoption before upgrading;
+see the database guide. Concurrent profile-creation conflicts roll back and
+resolve the existing mapping when possible.
 
 ## Endpoints and changed code
 
@@ -277,7 +291,7 @@ Provider limits also apply to server-originated requests. See the detailed
 
 ## Testing and acceptance
 
-Implementation validation: **41 automated tests passed against local PostgreSQL
+Implementation validation: **65 automated tests passed against local PostgreSQL
 in Docker**. JavaScript syntax checking also passed. The running Docker app has
 also successfully authenticated a read-only settings request against the real
 Supabase project: email authentication is enabled, signups are allowed, and email
@@ -299,6 +313,31 @@ tokens, stable identity mapping, account isolation, secure cookie attributes,
 refresh rotation, invalid codes, CSRF, legacy-cookie/password bypass rejection,
 email collisions, provider outage, logout during outage, unverified identities,
 rate limiting, missing configuration, and anonymous loan completion.
+
+Browser session regression checks run the real frontend in headless Edge against
+the running app. Most session API responses are simulated; the final check uses
+the live local server to verify anonymous requests and CSRF rejection. **16 checks
+passed**, including expiry cleanup, one refresh for parallel requests within a
+tab, shared refresh errors, logout, startup outage recovery, rate-limit metadata,
+retry countdowns, and HttpOnly-cookie behavior. The audit also reran **31 temporary
+backend session checks, all passing**; these diagnostic checks are separate from
+the committed suite. Database migration and security coverage and actual hosted
+database checks are described in the [database guide](supabase-database.md).
+
+With Node.js 20+ and Microsoft Edge installed, start the Docker app, then run:
+
+```powershell
+npm ci --prefix tests/browser
+npm test --prefix tests/browser
+```
+
+Browser tests are a development dependency only; the app still needs no frontend
+build step. For a different installed Chromium browser, set
+`UDHAAR_TEST_BROWSER_PATH` to its executable. `UDHAAR_TEST_BASE_URL` overrides
+`http://127.0.0.1:8000`. No browser test sends login emails or uses an existing
+browser profile. Real Supabase multi-device revocation, concurrent-tab refresh
+rotation, and session persistence across backend restarts still need live-provider
+verification.
 
 After configuring the real project, complete this manual check:
 
@@ -353,7 +392,7 @@ Supabase is unavailable. Direct host Python defaults to local mode unless the
 environment says otherwise. Never use that switch as an outage workaround for a
 public deployment.
 
-Before production: enable HTTPS and secure cookies, add formal migrations,
+Before production: enable HTTPS and secure cookies, review migration releases,
 distributed rate limits and monitoring, decide account migration/deletion policy,
 configure reliable SMTP, and test session behavior across browsers and failures.
 Supabase manages authentication infrastructure; Udhaar still manages application

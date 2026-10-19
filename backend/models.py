@@ -1,15 +1,10 @@
 """Udhaar schema. Common records can support future MoneyLoan rows."""
-import os
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-from sqlalchemy import create_engine, String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+from sqlalchemy import String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-ROOT = Path(__file__).resolve().parent.parent
-DATABASE_URL = os.getenv('UDHAAR_DATABASE_URL', f'sqlite:///{ROOT / "udhaar.sqlite3"}')
-engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False} if DATABASE_URL.startswith('sqlite') else {}, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+from .database import DATABASE_URL, engine, SessionLocal
 
 def uid():
     return str(uuid.uuid4())
