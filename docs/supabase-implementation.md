@@ -148,21 +148,26 @@ This avoids one user's provider session leaking into another request.
 
 ## Protected requests, refresh, and logout
 
-FastAPI calls Supabase's authenticated `/user` endpoint to validate an access
-token, then looks up the provider identity in local PostgreSQL. It never trusts
-an email or user ID supplied by the browser, nor merely decodes a JWT and assumes
-it is valid. This network validation adds latency and means protected requests
-need Supabase connectivity. See [server-validated user retrieval](https://supabase.com/docs/reference/python/auth-getuser).
+For ordinary protected requests, FastAPI verifies the JWT signature and claims
+locally with PyJWT using Supabase's public JWKS keys, cached for ten minutes.
+It checks issuer, audience, expiration, issued-at, user UUID, authenticated role,
+and non-anonymous status. ES256 and RS256 projects are supported; legacy HS256
+tokens are rejected. The configured project advertises ES256.
+The provider `/user` endpoint is still used when establishing or refreshing a
+session, before accepting its verified identity. This removes an Auth API call
+from each normal application request. See [JWT validation](https://supabase.com/docs/guides/auth/jwts).
+User deletion, banning, or email changes at the provider are not rechecked on
+every local JWT validation; an issued token can remain accepted until expiry.
 
 ```mermaid
 flowchart TD
-    A[Request protected endpoint] --> B{Access token accepted by Supabase?}
+    A[Request protected endpoint] --> B{JWT signature and claims valid locally?}
     B -->|Yes| C[Find local identity and enforce record permissions]
     B -->|401| D[Frontend requests refresh once with CSRF token]
     D --> E{Refresh accepted and local profile exists?}
     E -->|Yes| F[Set rotated cookies and retry original request once]
     E -->|No| G[Require sign-in again]
-    B -->|Service unavailable| H[Return 503; no local-auth fallback]
+    B -->|Required signing keys unavailable| H[Return 503; no local-auth fallback]
     C --> I[Return authorized data]
 ```
 
@@ -261,16 +266,18 @@ All POST authentication endpoints require the existing CSRF cookie/header pair.
 | `tests/test_supabase_auth.py` | Simulate provider HTTP for authentication/security regressions |
 | `scripts/smoke_test.py` | Prevent the older password smoke test running against OTP mode |
 
-There is a basic in-process, per-IP and per-email limit: five code requests or ten
-verification attempts per minute. It is bounded in memory and resets on restart.
-It is sufficient for local testing, not distributed production abuse protection.
-Provider limits also apply; the server-side integration sends provider requests
-from the backend's network address. Configure production limits and trusted proxy
-handling before public use.
+The application enforces one code-send attempt per email per 60 seconds, five
+sends per IP per minute, ten code-request/preflight checks per IP/email per
+minute, and ten verification attempts per IP/email per minute. Counts are
+process-local and reset on restart. Duplicate signups are rejected from the
+local `users` table before sending email and do not consume the email-send cooldown.
+Supabase-only identities with no completed local profile can finish signup.
+Provider limits also apply to server-originated requests. See the detailed
+[rate-limit and signup guide](auth-rate-limits.md).
 
 ## Testing and acceptance
 
-Implementation validation: **27 automated tests passed against local PostgreSQL
+Implementation validation: **41 automated tests passed against local PostgreSQL
 in Docker**. JavaScript syntax checking also passed. The running Docker app has
 also successfully authenticated a read-only settings request against the real
 Supabase project: email authentication is enabled, signups are allowed, and email

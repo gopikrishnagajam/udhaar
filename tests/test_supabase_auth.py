@@ -1,9 +1,13 @@
 """Supabase is simulated at the HTTP boundary; no test sends real email."""
 import json
+import time
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from sqlalchemy import select, func
 
 from backend import supabase_auth as auth
@@ -21,7 +25,17 @@ def remote(setup, monkeypatch):
     monkeypatch.setenv('SUPABASE_URL', 'https://test-project.supabase.co')
     monkeypatch.setenv('SUPABASE_PUBLISHABLE_KEY', 'sb_publishable_test')
     auth._attempts.clear()
-    state = {'requests': [], 'users': {}, 'tokens': {}, 'refresh': {}, 'expired': set(), 'offline': False, 'otp_failure': None}
+    state = {'requests': [], 'users': {}, 'tokens': {}, 'refresh': {}, 'expired': set(), 'offline': False, 'otp_failure': None, 'clock': 1000}
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    monkeypatch.setattr(auth, '_clock', lambda: state['clock'])
+    monkeypatch.setattr(auth, 'signing_keys', lambda url: SimpleNamespace(get_signing_key_from_jwt=lambda token: SimpleNamespace(key=private_key.public_key())))
+    def mint(user, **changes):
+        claims = {'sub': user['id'], 'iss': 'https://test-project.supabase.co/auth/v1',
+                  'aud': 'authenticated', 'role': 'authenticated', 'is_anonymous': False,
+                  'iat': int(time.time()), 'exp': int(time.time()) + 3600, 'jti': str(uuid4())}
+        claims.update(changes)
+        return jwt.encode(claims, private_key, algorithm='ES256', headers={'kid': 'test-key'})
+    state['mint'] = mint
 
     def handler(request):
         assert str(request.url).startswith('https://test-project.supabase.co/auth/v1/')
@@ -33,14 +47,14 @@ def remote(setup, monkeypatch):
         path = request.url.path
         if path.endswith('/otp'):
             if state['otp_failure']:
-                return httpx.Response(500, json=state['otp_failure'])
+                return httpx.Response(state.get('otp_status', 500), json=state['otp_failure'], headers=state.get('otp_headers', {}))
             return httpx.Response(200, json={})
         if path.endswith('/verify'):
             if payload['token'] != '123456':
                 return httpx.Response(403, json={'msg': 'Invalid OTP'})
             email = payload['email']
             user = state['users'].setdefault(email, {'id': str(uuid4()), 'email': email, 'email_confirmed_at': '2026-10-16T00:00:00Z'})
-            access, refresh = 'access-' + user['id'], 'refresh-' + user['id']
+            access, refresh = mint(user), 'refresh-' + user['id']
             state['tokens'][access] = user
             state['refresh'][refresh] = user
             return httpx.Response(200, json={'access_token': access, 'refresh_token': refresh, 'expires_in': 3600})
@@ -53,7 +67,7 @@ def remote(setup, monkeypatch):
             user = state['refresh'].pop(payload['refresh_token'], None)
             if not user:
                 return httpx.Response(401, json={})
-            access, refresh = 'renewed-' + str(uuid4()), 'renewed-refresh-' + str(uuid4())
+            access, refresh = mint(user), 'renewed-refresh-' + str(uuid4())
             state['tokens'][access] = user
             state['refresh'][refresh] = user
             return httpx.Response(200, json={'access_token': access, 'refresh_token': refresh, 'expires_in': 3600})
@@ -68,8 +82,8 @@ def remote(setup, monkeypatch):
     auth._attempts.clear()
 
 
-def signin(client, email='alex@example.com', name='Alex'):
-    requested = post(client, '/api/auth/otp', {'email': email, 'signup': True})
+def signin(client, email='alex@example.com', name='Alex', signup=True):
+    requested = post(client, '/api/auth/otp', {'email': email, 'signup': signup})
     assert requested.status_code == 200, requested.text
     response = post(client, '/api/auth/verify', {'email': email, 'code': '123456', 'name': name})
     assert response.status_code == 200, response.text
@@ -99,11 +113,12 @@ def test_verified_otp_creates_local_profile_without_password_or_tokens(remote):
 
 
 def test_profile_is_stable_on_repeat_signin_and_accounts_are_isolated(remote):
-    (owner, guest, _), _state = remote
+    (owner, guest, _), state = remote
     first = signin(owner).json()['id']
     record = post(owner, '/api/records', {'direction': 'LENT', 'contact_name': 'Rahul', 'item_name': 'Book', 'loan_date': '2026-10-16'})
     assert record.status_code == 201
-    assert signin(owner, name='Other name').json()['id'] == first
+    state['clock'] += 61
+    assert signin(owner, name='Other name', signup=False).json()['id'] == first
     signin(guest, 'sam@example.com', 'Sam')
     assert guest.get('/api/records').json() == []
     assert guest.get('/api/records/' + record.json()['id']).status_code == 404
@@ -113,7 +128,7 @@ def test_expired_access_refreshes_and_rotates_cookies(remote):
     (owner, _, _), state = remote
     signin(owner)
     old = owner.cookies.get(auth.ACCESS_COOKIE)
-    state['expired'].add(old)
+    owner.cookies.set(auth.ACCESS_COOKIE, state['mint'](state['users']['alex@example.com'], exp=int(time.time())-1), domain='testserver.local', path='/')
     assert owner.get('/api/me').status_code == 401
     assert post(owner, '/api/auth/refresh').status_code == 200
     assert owner.cookies.get(auth.ACCESS_COOKIE) != old
@@ -194,11 +209,12 @@ def test_logout_clears_browser_even_when_provider_is_offline(remote, offline):
     assert owner.get('/api/me').status_code == 401
 
 
-def test_provider_outage_has_no_local_fallback(remote):
+def test_provider_outage_does_not_interrupt_locally_validated_requests(remote):
     (owner, _, _), state = remote
     signin(owner)
     state['offline'] = True
-    assert owner.get('/api/me').status_code == 503
+    assert owner.get('/api/me').status_code == 200
+    state['clock'] += 61
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 503
 
 
@@ -214,21 +230,97 @@ def test_email_delivery_failure_is_actionable_without_leaking_provider_details(r
     assert 'private@example.com' not in caplog.text + response.text
 
 
-def test_unverified_or_anonymous_identity_is_rejected(remote):
+def test_unverified_identity_cannot_establish_a_session(remote):
     (owner, _, _), state = remote
-    signin(owner)
-    state['users']['alex@example.com']['email_confirmed_at'] = None
-    assert owner.get('/api/me').status_code == 401
+    state['users']['alex@example.com'] = {'id': str(uuid4()), 'email': 'alex@example.com', 'email_confirmed_at': None}
+    assert post(owner, '/api/auth/verify', {'email': 'alex@example.com', 'code': '123456'}).status_code == 401
 
 
 def test_otp_rate_limit_and_configuration_failure(remote, monkeypatch):
     (owner, _, _), state = remote
-    for _ in range(5):
-        assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 200
+    for index in range(5):
+        assert post(owner, '/api/auth/otp', {'email': f'user{index}@example.com'}).status_code == 200
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 429
     monkeypatch.delenv('SUPABASE_PUBLISHABLE_KEY')
     assert owner.get('/api/auth/config').json()['configured'] is False
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 503
+
+
+def test_existing_signup_sends_no_email_and_does_not_block_signin(remote):
+    (owner, _, _), state = remote
+    original_id = signin(owner).json()['id']
+    state['clock'] += 61
+    state['requests'].clear()
+    response = post(owner, '/api/auth/otp', {'email': '  ALEX@EXAMPLE.COM  ', 'signup': True})
+    assert response.status_code == 409
+    assert 'Sign in instead' in response.json()['detail']
+    assert state['requests'] == []
+    assert signin(owner, signup=False).json()['id'] == original_id
+
+
+def test_email_cooldown_is_shared_between_forms_and_returns_actual_wait(remote):
+    (owner, guest, _), state = remote
+    assert post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 200
+    state['clock'] += 10
+    blocked = post(guest, '/api/auth/otp', {'email': 'ALEX@example.com', 'signup': False})
+    assert blocked.status_code == 429
+    assert blocked.headers['retry-after'] == '50'
+    assert len(state['requests']) == 1
+    state['clock'] += 50
+    assert post(guest, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 200
+    assert len(state['requests']) == 2
+
+
+def test_normal_app_requests_do_not_consume_supabase_user_endpoint_limit(remote):
+    (owner, _, _), state = remote
+    signin(owner)
+    baseline = len(state['requests'])
+    for _ in range(35):
+        assert owner.get('/api/me').status_code == 200
+        assert owner.get('/api/records').status_code == 200
+    assert len(state['requests']) == baseline
+
+
+@pytest.mark.parametrize('claims', [
+    {'exp': 1}, {'iss': 'https://wrong-project.supabase.co/auth/v1'},
+    {'aud': 'wrong-audience'}, {'sub': 'invalid-uuid'},
+    {'role': 'service_role'}, {'is_anonymous': True},
+    {'iat': int(time.time()) + 3600}, {'nbf': int(time.time()) + 3600},
+])
+def test_local_token_validation_rejects_invalid_claims(remote, claims):
+    (owner, _, _), state = remote
+    signin(owner)
+    token = state['mint'](state['users']['alex@example.com'], **claims)
+    owner.cookies.set(auth.ACCESS_COOKIE, token, domain='testserver.local', path='/')
+    assert owner.get('/api/me').status_code == 401
+
+
+def test_local_token_validation_rejects_forged_signatures(remote):
+    (owner, _, _), state = remote
+    signin(owner)
+    token = owner.cookies.get(auth.ACCESS_COOKIE)
+    claims = jwt.decode(token, options={'verify_signature': False})
+    forged = jwt.encode(claims, ec.generate_private_key(ec.SECP256R1()), algorithm='ES256', headers={'kid': 'test-key'})
+    owner.cookies.set(auth.ACCESS_COOKIE, forged, domain='testserver.local', path='/')
+    assert owner.get('/api/me').status_code == 401
+
+
+def test_upstream_rate_limit_keeps_provider_retry_after(remote):
+    (owner, _, _), state = remote
+    state.update(otp_status=429, otp_headers={'Retry-After': '120'}, otp_failure={'error_code': 'over_email_send_rate_limit', 'msg': 'Email rate limit exceeded'})
+    result = post(owner, '/api/auth/otp', {'email': 'alex@example.com'})
+    assert result.status_code == 429
+    assert result.headers['retry-after'] == '120'
+    assert 'Supabase' in result.json()['detail']
+
+
+def test_auth_config_reports_cookie_presence_without_provider_requests(remote):
+    (owner, _, _), state = remote
+    assert owner.get('/api/auth/config').json()['has_session'] is False
+    signin(owner)
+    baseline = len(state['requests'])
+    assert owner.get('/api/auth/config').json()['has_session'] is True
+    assert len(state['requests']) == baseline
 
 
 def test_anonymous_loan_link_still_supports_both_acknowledgments(remote):

@@ -1,6 +1,6 @@
 # Understanding Udhaar: authentication, data, sharing, and email
 
-This guide explains the current implementation, inspected on October 16, 2026.
+This guide explains the current implementation, updated on October 19, 2026.
 The user has reported that the live flow works. For installation steps and a
 file-by-file implementation reference, use [the Supabase implementation document](supabase-implementation.md).
 
@@ -134,8 +134,9 @@ credentials it needs to continue that session.
 The access token is a signed JWT: a structured credential with claims such as
 user identity and expiration. Signing protects against undetected modification;
 it does not encrypt the payload. Decoding a token is different from validating
-it. This app delegates validation to Supabase's `/user` endpoint rather than
-trusting decoded browser-supplied claims. See [JWT concepts](https://supabase.com/docs/guides/auth/jwts).
+it. Ordinary protected requests verify the signature and claims locally with
+Supabase's cached public signing keys. Session creation and refresh also validate
+the user through Supabase's `/user` endpoint. See [JWT concepts](https://supabase.com/docs/guides/auth/jwts).
 
 ### What HTTP-only cookies mean
 
@@ -169,7 +170,7 @@ identity, and replaces both cookies. The original request is then retried once.
 
 ```mermaid
 flowchart TD
-    R[Request Alex's records] --> V{Supabase accepts access token?}
+    R[Request Alex's records] --> V{JWT signature and claims valid locally?}
     V -->|Yes| O[Find local user and apply ownership check]
     O --> D[Return Alex's data]
     V -->|401| F[Frontend requests refresh once]
@@ -177,7 +178,7 @@ flowchart TD
     S -->|Yes| C[FastAPI replaces both auth cookies]
     C --> R2[Retry original request once]
     S -->|No| L[Sign in again]
-    V -->|Service unavailable| E[503: no local-password fallback]
+    V -->|Required public keys unavailable| E[503: no local-password fallback]
 ```
 
 Supabase rotates session tokens during refresh. One page shares an in-flight
@@ -191,9 +192,11 @@ Knowing a record ID alone does not grant access. The current API returns 404 for
 another user's record. Guest link routes have a separate permission check based
 on the link token and its associated record.
 
-Our implementation validates through Supabase on each protected request, so an
-existing cookie does not make the owner dashboard independent of internet access.
-Loan-link routes rely on local PostgreSQL and do not call Supabase for guest auth.
+Ordinary owner requests now use local JWT verification and local PostgreSQL.
+Internet access is still required for new sign-ins, refresh, and public-key fetches
+when keys are not cached. Provider-side account deletion or banning is not checked
+on every application request; existing tokens may remain valid until expiry.
+Loan-link routes use local PostgreSQL and do not call Supabase for guest auth.
 
 ### Signing out
 
@@ -562,8 +565,9 @@ configuration readiness; it does not perform a live provider sign-in test.
   Refresh to fetch new status.
 - Return totals are checked in application code. Production work still includes
   transaction locking for simultaneous return requests and formal migrations.
-- Email/verification rate limiting is currently process-local: five send attempts
-  or ten verification attempts per minute per IP/email, alongside provider limits.
+- Email rate limiting is process-local: one send attempt per email per 60 seconds,
+  five per IP per minute, and ten verification attempts per IP/email per minute.
+  See [rate limits and signup behavior](auth-rate-limits.md) for all layers.
 - No automatic migration of old local accounts, realtime synchronization, payment
   processing, or behavioral analytics was added by the auth integration.
 

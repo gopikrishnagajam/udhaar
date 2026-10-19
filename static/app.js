@@ -6,19 +6,48 @@ const prettyDate = (date) => date ? new Date(`${date}T12:00:00`).toLocaleDateStr
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 let csrf = '', user = null, records = [], tab = 'ALL', activeRecord = null, newOpen = false, signup = window.location.pathname.replace(/\/$/, '') === '/signup', shareLink = '', notice = '', busy = false;
 let authConfig = {provider:'local', configured:true}, authEmail = '', authName = '', otpSent = false, refreshPromise = null;
+const otpCooldowns = new Map();
+let authSubmitting = false;
+let verifyRetryUntil = 0;
+
+function updateOtpControls() {
+ const form=$('#otp-form');if(!form)return;
+ const email=(otpSent?authEmail:($('input[name=email]',form)?.value||'')).trim().toLowerCase();
+ const remaining=Math.max(0,Math.ceil(((otpCooldowns.get(email)||0)-Date.now())/1000));
+ const verifyRemaining=Math.max(0,Math.ceil((verifyRetryUntil-Date.now())/1000));
+ const submit=$('button[type=submit]',form);
+ submit.disabled=!authConfig.configured||authSubmitting||(otpSent?verifyRemaining>0:remaining>0);
+ submit.textContent=otpSent?(verifyRemaining?`Verify in ${verifyRemaining}s`:'Verify and continue'):remaining?`Send code in ${remaining}s`:'Send sign-in code';
+ const resend=$('#resend-code');if(resend){resend.disabled=authSubmitting||remaining>0;resend.textContent=remaining?`Resend in ${remaining}s`:'Resend code';}
+}
+
+async function requestOtpCode() {
+ try {
+  const result=await send('/api/auth/otp',{email:authEmail,signup});
+  otpCooldowns.set(authEmail.toLowerCase(),Date.now()+(result.retry_after_seconds||60)*1000);
+  return result;
+ } catch(err) {
+  if(err.status!==409) otpCooldowns.set(authEmail.toLowerCase(),Date.now()+(err.retryAfter||60)*1000);
+  throw err;
+ }
+}
 
 async function api(path, options = {}, retried = false) {
   const resp = await fetch(path, {credentials:'same-origin', ...options, headers: {...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.method && options.method !== 'GET' ? {'X-CSRF-Token':csrf} : {}), ...(options.headers || {})}});
-  if(resp.status===401 && !retried && authConfig.provider==='supabase' && (path==='/api/me'||path.startsWith('/api/records'))) {
+  if(resp.status===401 && !retried && authConfig.provider==='supabase' && authConfig.has_session && (path==='/api/me'||path.startsWith('/api/records'))) {
     if(!refreshPromise) refreshPromise=fetch('/api/auth/refresh',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf}}).finally(()=>{refreshPromise=null});
     const refreshed=await refreshPromise;
     if(refreshed.ok) return api(path,options,true);
+    if(refreshed.status===401) authConfig.has_session=false;
     if(refreshed.status>=500) throw new Error('Sign-in service unavailable. Please retry.');
   }
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const details = Array.isArray(body.detail) ? body.detail.map(d=>d.msg).join('; ') : body.detail;
-    throw new Error(typeof details === 'string' ? details : `Request failed (${resp.status})`);
+    const error=new Error(typeof details === 'string' ? details : `Request failed (${resp.status})`);
+    error.status=resp.status;
+    error.retryAfter=Number(resp.headers.get('Retry-After'))||0;
+    throw error;
   }
   return body;
 }
@@ -93,17 +122,20 @@ function supabaseAuthScreen() {
  ${!authConfig.configured?'<p class="form-error" role="alert">Email sign-in is not configured yet. Ask the app administrator to complete setup.</p>':''}
  <form id="otp-form">${otpSent?'<label>Sign-in code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" minlength="6" maxlength="10" autofocus /></label>':`${signup?`<label>Your name<input name="name" required maxlength="100" autocomplete="name" value="${esc(authName)}" /></label>`:''}<label>Email address<input name="email" type="email" required maxlength="255" autocomplete="email" value="${esc(authEmail)}" /></label>`}
  <button class="btn btn-primary full" type="submit" ${!authConfig.configured?'disabled':''}>${otpSent?'Verify and continue':'Send sign-in code'} ${icon('arrow',18)}</button><p class="form-error" id="otp-error" role="alert"></p></form>
- ${otpSent?'<div class="auth-switch"><button id="change-email">Change email</button> <button id="resend-code" disabled>Resend code</button></div>':`<div class="auth-switch">${signup?'Already have an account?':'New to Udhaar?'} <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>`}
+ <div class="auth-switch">${otpSent?'<button id="change-email">Change email</button> <button id="resend-code" disabled>Resend code</button> ':''}<span>${signup?'Already have an account?':'New to Udhaar?'}</span> <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>
  <div class="auth-note">Your personal records stay private unless you share a loan link.</div></div></section></div>`;
- $('#switch-auth')?.addEventListener('click',()=>{signup=!signup;authScreen()});
- $('#change-email')?.addEventListener('click',()=>{otpSent=false;authScreen()});
+ $('#switch-auth')?.addEventListener('click',()=>{if(authSubmitting)return;signup=!signup;otpSent=false;authScreen()});
+ $('#change-email')?.addEventListener('click',()=>{if(authSubmitting)return;otpSent=false;authScreen()});
  const resend=$('#resend-code');
- if(resend){setTimeout(()=>{if(resend.isConnected)resend.disabled=false},60000);resend.onclick=async()=>{resend.disabled=true;try{await send('/api/auth/otp',{email:authEmail,signup});toast('If eligible, another code has been sent.');setTimeout(()=>{if(resend.isConnected)resend.disabled=false},60000)}catch(err){$('#otp-error').textContent=err.message;resend.disabled=false}};}
- $('#otp-form').onsubmit=async e=>{e.preventDefault();const button=$('button[type=submit]',e.target);button.disabled=true;const data=Object.fromEntries(new FormData(e.target));
-  try{if(!otpSent){authEmail=data.email.trim();authName=(data.name||'').trim();await send('/api/auth/otp',{email:authEmail,signup});otpSent=true;authScreen();}
-   else{user=await send('/api/auth/verify',{email:authEmail,code:data.code.trim(),name:authName});otpSent=false;await loadRecords();}}
-  catch(err){$('#otp-error')?.replaceChildren(document.createTextNode(err.message));}
-  finally{button.disabled=false;}
+ if(resend){resend.onclick=async()=>{if(authSubmitting||resend.disabled)return;authSubmitting=true;updateOtpControls();try{await requestOtpCode();toast('If eligible, another code has been sent.')}catch(err){$('#otp-error').textContent=err.message}finally{authSubmitting=false;updateOtpControls()}};}
+ const form=$('#otp-form');
+ $('input[name=email]',form)?.addEventListener('input',updateOtpControls);
+ updateOtpControls();const timer=setInterval(()=>{if(!form.isConnected){clearInterval(timer);return}updateOtpControls()},250);
+ form.onsubmit=async e=>{e.preventDefault();updateOtpControls();if(authSubmitting||$('button[type=submit]',form).disabled)return;const data=Object.fromEntries(new FormData(e.target));authSubmitting=true;updateOtpControls();
+  try{if(!otpSent){authEmail=data.email.trim().toLowerCase();authName=(data.name||'').trim();await requestOtpCode();otpSent=true;authScreen();}
+   else{user=await send('/api/auth/verify',{email:authEmail,code:data.code.trim(),name:authName});authConfig.has_session=true;otpSent=false;await loadRecords();}}
+  catch(err){if(otpSent&&err.status===429)verifyRetryUntil=Date.now()+(err.retryAfter||60)*1000;$('#otp-error')?.replaceChildren(document.createTextNode(err.message));}
+  finally{authSubmitting=false;updateOtpControls();}
  };
 }
 function topLayout(content) {
@@ -118,7 +150,7 @@ function topLayout(content) {
  </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark">${icon('package',19)}</span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
  $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render()});
  $('#invite-friends').onclick=()=>showSignupShare();
- $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});user=null;records=[];activeRecord=null;otpSent=false;authName='';authScreen()}catch(err){toast(err.message)}};
+ $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});authConfig.has_session=false;user=null;records=[];activeRecord=null;otpSent=false;authName='';authScreen()}catch(err){toast(err.message)}};
  $('#toggle-nav')?.addEventListener('click',()=>$('#sidebar').classList.toggle('sidebar-open'));
 }
 function dashboard() {
@@ -238,6 +270,7 @@ async function guestPage(token){
  const guestMatch=window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]+)\/?$/);
  if(guestMatch){await guestPage(guestMatch[1]);return}
  authConfig=await api('/api/auth/config');
+ if(authConfig.provider==='supabase'&&!authConfig.has_session){authScreen();return}
  try{user=await api('/api/me');await loadRecords()}catch{authScreen()}
  }catch(e){$('#app').innerHTML=`<div class="loading-screen">Could not start Udhaar: ${esc(e.message)}. Refresh to retry.</div>`}
 })();

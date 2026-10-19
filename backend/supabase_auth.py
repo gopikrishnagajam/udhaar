@@ -3,15 +3,18 @@ import os
 import logging
 import re
 import time
+import math
+from functools import lru_cache
 from collections import OrderedDict
 from threading import Lock
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,6 +25,34 @@ REFRESH_COOKIE = 'udhaar_sb_refresh'
 _attempts = OrderedDict()
 _attempts_lock = Lock()
 logger = logging.getLogger('uvicorn.error')
+_clock = time.monotonic
+
+
+@lru_cache(maxsize=4)
+def signing_keys(url):
+    # Only public keys are fetched. Cache the key set for at most ten minutes.
+    return jwt.PyJWKClient(url + '/auth/v1/.well-known/jwks.json',
+                          cache_keys=False, lifespan=600, timeout=5)
+
+
+def token_subject(access_token):
+    """Verify signature and claims locally; no /user call during ordinary app use."""
+    url, _ = settings()
+    try:
+        algorithm = jwt.get_unverified_header(access_token).get('alg')
+        if algorithm not in {'ES256', 'RS256'}:
+            raise jwt.InvalidAlgorithmError('Unsupported signing algorithm')
+        key = signing_keys(url).get_signing_key_from_jwt(access_token)
+        claims = jwt.decode(access_token, key.key, algorithms=['ES256', 'RS256'],
+                            audience='authenticated', issuer=url + '/auth/v1',
+                            options={'require': ['exp', 'iat', 'sub', 'iss', 'aud']})
+        if claims.get('role') != 'authenticated' or claims.get('is_anonymous') is not False:
+            raise jwt.InvalidTokenError('Verified account required')
+        return str(UUID(claims['sub']))
+    except jwt.PyJWKClientConnectionError:
+        raise HTTPException(503, 'Authentication signing keys unavailable; please retry') from None
+    except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
+        raise HTTPException(401, 'Session invalid or expired; please sign in again') from None
 
 
 def provider():
@@ -79,7 +110,10 @@ def auth_request(method, path, payload=None, token=None):
         if path == '/otp' and code == 'email_address_not_authorized':
             raise HTTPException(503, 'Email delivery is not enabled for this recipient. Configure custom SMTP in Supabase')
     if result.status_code == 429:
-        raise HTTPException(429, 'Too many authentication attempts; wait before retrying', headers={'Retry-After': '60'})
+        # Provider cooldowns can be project-wide and longer than the local timer.
+        retry = result.headers.get('retry-after', '')
+        headers = {'Retry-After': retry} if retry.isdigit() and 0 < int(retry) <= 86400 else {}
+        raise HTTPException(429, 'Supabase authentication limit reached. Wait before retrying; check the project Auth rate limits if it persists', headers=headers)
     if result.status_code in {400, 401, 403, 422}:
         raise HTTPException(401, 'Authentication failed. Check your code or sign in again')
     if not 200 <= result.status_code < 300:
@@ -141,7 +175,7 @@ def authenticated_user(request, db):
     token = request.cookies.get(ACCESS_COOKIE)
     if not token:
         raise HTTPException(401, 'Please sign in')
-    subject, _ = verified_identity(token)
+    subject = token_subject(token)
     user = find_user(db, subject)
     if not user:
         raise HTTPException(401, 'Local account not found; sign in again')
@@ -172,14 +206,18 @@ def clear_session(response):
 
 def limit_attempts(request, email, action):
     """Bounded, process-local protection for the local beta, not a distributed limiter."""
-    clock = time.monotonic()
+    clock = _clock()
     keys = [(action, 'ip', request.client.host if request.client else 'unknown'), (action, 'email', email)]
     with _attempts_lock:
         for key in keys:
             attempts = [t for t in _attempts.get(key, []) if clock - t < 60]
             _attempts[key] = attempts
-            if len(attempts) >= (5 if action == 'send' else 10):
-                raise HTTPException(429, 'Too many attempts; wait one minute', headers={'Retry-After': '60'})
+            limit = (1 if key[1] == 'email' else 5) if action == 'send' else 10
+            if len(attempts) >= limit:
+                retry = max(1, math.ceil(60 - (clock - attempts[0])))
+                detail = (f'Wait {retry} seconds before requesting another code' if action == 'send'
+                          else f'Too many authentication attempts. Try again in {retry} seconds')
+                raise HTTPException(429, detail, headers={'Retry-After': str(retry)})
         for key in keys:
             _attempts[key].append(clock)
             _attempts.move_to_end(key)
@@ -217,7 +255,7 @@ def make_router(get_db, csrf_dependency):
     router = APIRouter(prefix='/api/auth', tags=['authentication'])
 
     @router.get('/config')
-    def config():
+    def config(request: Request):
         mode = provider()
         configured = True
         if mode == 'supabase':
@@ -225,14 +263,20 @@ def make_router(get_db, csrf_dependency):
                 settings()
             except HTTPException:
                 configured = False
-        return {'provider': mode, 'configured': configured, 'method': 'email_otp' if mode == 'supabase' else 'password'}
+        return {'provider': mode, 'configured': configured, 'method': 'email_otp' if mode == 'supabase' else 'password',
+                'has_session': bool(request.cookies.get(ACCESS_COOKIE) or request.cookies.get(REFRESH_COOKIE))}
 
     @router.post('/otp', dependencies=[Depends(csrf_dependency), Depends(require_supabase)])
-    def send_code(body: OtpRequest, request: Request):
+    def send_code(body: OtpRequest, request: Request, db: Session = Depends(get_db)):
+        # Bound account-existence checks too, without consuming an email cooldown
+        # for a rejected duplicate signup. The user can immediately choose sign-in.
+        limit_attempts(request, body.email, 'request')
+        if body.signup and db.scalar(select(User.id).where(func.lower(User.email) == body.email)):
+            raise HTTPException(409, 'An account with this email already exists. Sign in instead')
         limit_attempts(request, body.email, 'send')
         # Name is local-only. No loan information or profile metadata goes to Supabase.
         auth_request('POST', '/otp', {'email': body.email, 'create_user': body.signup})
-        return {'ok': True, 'message': 'If eligible, a sign-in code has been sent. Check your inbox'}
+        return {'ok': True, 'message': 'If eligible, a sign-in code has been sent. Check your inbox', 'retry_after_seconds': 60}
 
     @router.post('/verify', dependencies=[Depends(csrf_dependency), Depends(require_supabase)])
     def verify_code(body: OtpVerify, request: Request, response: Response, db: Session = Depends(get_db)):
