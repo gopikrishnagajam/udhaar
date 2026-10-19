@@ -5,9 +5,16 @@ const esc = (value = '') => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'
 const prettyDate = (date) => date ? new Date(`${date}T12:00:00`).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : 'No return date';
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 let csrf = '', user = null, records = [], tab = 'ALL', activeRecord = null, newOpen = false, signup = window.location.pathname.replace(/\/$/, '') === '/signup', shareLink = '', notice = '', busy = false;
+let authConfig = {provider:'local', configured:true}, authEmail = '', authName = '', otpSent = false, refreshPromise = null;
 
-async function api(path, options = {}) {
+async function api(path, options = {}, retried = false) {
   const resp = await fetch(path, {credentials:'same-origin', ...options, headers: {...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.method && options.method !== 'GET' ? {'X-CSRF-Token':csrf} : {}), ...(options.headers || {})}});
+  if(resp.status===401 && !retried && authConfig.provider==='supabase' && (path==='/api/me'||path.startsWith('/api/records'))) {
+    if(!refreshPromise) refreshPromise=fetch('/api/auth/refresh',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf}}).finally(()=>{refreshPromise=null});
+    const refreshed=await refreshPromise;
+    if(refreshed.ok) return api(path,options,true);
+    if(refreshed.status>=500) throw new Error('Sign-in service unavailable. Please retry.');
+  }
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const details = Array.isArray(body.detail) ? body.detail.map(d=>d.msg).join('; ') : body.detail;
@@ -61,6 +68,7 @@ function acknowledgmentSummary(r) {
  return `<div class="detail-summary"><div><small>1. Item taken / given</small><strong class="small-strong">${handover[r.handover_acknowledgment]||handover[r.acknowledgment]}</strong></div><div><small>2. Returned / completed</small><strong class="small-strong">${returned[r.return_acknowledgment]||returned.NONE}</strong></div></div>`;
 }
 function authScreen() {
+ if(authConfig.provider==='supabase') {supabaseAuthScreen();return;}
  $('#app').innerHTML = `<div class="auth-wrap">
  <section class="auth-intro"><div class="brand brand-light"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
  <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>That book you borrowed. The charger you lent. The things you meant to get back. All in one calm place.</p></div>
@@ -75,6 +83,29 @@ function authScreen() {
  $('#switch-auth').onclick=()=>{signup=!signup;authScreen()};
  $('#auth-form').onsubmit=async e=>{e.preventDefault();const btn=$('#auth-form button[type=submit]');btn.disabled=true;const d=Object.fromEntries(new FormData(e.target));try {user=await send(signup?'/api/register':'/api/login',d);await loadRecords();}catch(err){$('#auth-error').textContent=err.message}finally{btn.disabled=false}};
 }
+function supabaseAuthScreen() {
+ $('#app').innerHTML=`<div class="auth-wrap">
+ <section class="auth-intro"><div class="brand brand-light"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
+ <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>A simple place for the things you lend and borrow.</p></div></section>
+ <section class="auth-panel"><div class="auth-box"><div class="auth-chip">${icon('shield',14)} Sign in with an email code</div>
+ <h2>${otpSent?'Check your inbox.':signup?'Make yourself at home.':'Welcome back.'}</h2>
+ <p>${otpSent?`Enter the sign-in code sent to ${esc(authEmail)}.`:'We will email you a one-time code. No password needed.'}</p>
+ ${!authConfig.configured?'<p class="form-error" role="alert">Email sign-in is not configured yet. Ask the app administrator to complete setup.</p>':''}
+ <form id="otp-form">${otpSent?'<label>Sign-in code<input name="code" required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" minlength="6" maxlength="10" autofocus /></label>':`${signup?`<label>Your name<input name="name" required maxlength="100" autocomplete="name" value="${esc(authName)}" /></label>`:''}<label>Email address<input name="email" type="email" required maxlength="255" autocomplete="email" value="${esc(authEmail)}" /></label>`}
+ <button class="btn btn-primary full" type="submit" ${!authConfig.configured?'disabled':''}>${otpSent?'Verify and continue':'Send sign-in code'} ${icon('arrow',18)}</button><p class="form-error" id="otp-error" role="alert"></p></form>
+ ${otpSent?'<div class="auth-switch"><button id="change-email">Change email</button> <button id="resend-code" disabled>Resend code</button></div>':`<div class="auth-switch">${signup?'Already have an account?':'New to Udhaar?'} <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>`}
+ <div class="auth-note">Your personal records stay private unless you share a loan link.</div></div></section></div>`;
+ $('#switch-auth')?.addEventListener('click',()=>{signup=!signup;authScreen()});
+ $('#change-email')?.addEventListener('click',()=>{otpSent=false;authScreen()});
+ const resend=$('#resend-code');
+ if(resend){setTimeout(()=>{if(resend.isConnected)resend.disabled=false},60000);resend.onclick=async()=>{resend.disabled=true;try{await send('/api/auth/otp',{email:authEmail,signup});toast('If eligible, another code has been sent.');setTimeout(()=>{if(resend.isConnected)resend.disabled=false},60000)}catch(err){$('#otp-error').textContent=err.message;resend.disabled=false}};}
+ $('#otp-form').onsubmit=async e=>{e.preventDefault();const button=$('button[type=submit]',e.target);button.disabled=true;const data=Object.fromEntries(new FormData(e.target));
+  try{if(!otpSent){authEmail=data.email.trim();authName=(data.name||'').trim();await send('/api/auth/otp',{email:authEmail,signup});otpSent=true;authScreen();}
+   else{user=await send('/api/auth/verify',{email:authEmail,code:data.code.trim(),name:authName});otpSent=false;await loadRecords();}}
+  catch(err){$('#otp-error')?.replaceChildren(document.createTextNode(err.message));}
+  finally{button.disabled=false;}
+ };
+}
 function topLayout(content) {
  $('#app').innerHTML=`<div class="layout"><aside class="sidebar" id="sidebar">
    <div class="brand"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
@@ -87,7 +118,7 @@ function topLayout(content) {
  </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark">${icon('package',19)}</span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
  $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render()});
  $('#invite-friends').onclick=()=>showSignupShare();
- $('#logout').onclick=async()=>{await send('/api/logout',{});user=null;records=[];activeRecord=null;authScreen()};
+ $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});user=null;records=[];activeRecord=null;otpSent=false;authName='';authScreen()}catch(err){toast(err.message)}};
  $('#toggle-nav')?.addEventListener('click',()=>$('#sidebar').classList.toggle('sidebar-open'));
 }
 function dashboard() {
@@ -206,6 +237,7 @@ async function guestPage(token){
  try{csrf=(await api('/api/csrf')).csrf;
  const guestMatch=window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]+)\/?$/);
  if(guestMatch){await guestPage(guestMatch[1]);return}
+ authConfig=await api('/api/auth/config');
  try{user=await api('/api/me');await loadRecords()}catch{authScreen()}
  }catch(e){$('#app').innerHTML=`<div class="loading-screen">Could not start Udhaar: ${esc(e.message)}. Refresh to retry.</div>`}
 })();

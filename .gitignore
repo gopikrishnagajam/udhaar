@@ -5,3 +5,5 @@ __pycache__/
 *.db
 .env
 .venv/
+secrets.txt
+.vscode

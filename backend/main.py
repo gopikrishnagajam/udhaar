@@ -15,6 +15,7 @@ from sqlalchemy import select, func, text
 from sqlalchemy.orm import Session
 
 from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, now
+from . import supabase_auth
 
 app = FastAPI(title='Udhaar MVP', docs_url='/api/docs', openapi_url='/api/openapi.json')
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +87,8 @@ def utc(dt: datetime):
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 def auth_user(request: Request, db: Session = Depends(get_db)):
+    if supabase_auth.provider() == 'supabase':
+        return supabase_auth.authenticated_user(request, db)
     token = request.cookies.get('udhaar_session')
     if not token:
         raise HTTPException(401, 'Please sign in')
@@ -101,6 +104,8 @@ def require_csrf(request: Request, x_csrf_token: str | None = Header(None)):
     cookie = request.cookies.get('udhaar_csrf')
     if not cookie or not x_csrf_token or not secrets.compare_digest(cookie, x_csrf_token):
         raise HTTPException(403, 'Invalid CSRF token; refresh and retry')
+
+app.include_router(supabase_auth.make_router(get_db, require_csrf))
 
 def event(db: Session, rec: Record, actor: str, kind: str, description: str):
     db.add(RecordEvent(record_id=rec.id, actor=actor, event_type=kind, description=description))
@@ -215,6 +220,8 @@ def start_session(response: Response, db: Session, user: User):
 
 @app.post('/api/register', dependencies=[Depends(require_csrf)])
 def register(data: Register, response: Response, db: Session = Depends(get_db)):
+    if supabase_auth.provider() != 'local':
+        raise HTTPException(403, 'Use email-code authentication')
     if db.scalar(select(User).where(User.email == data.email)):
         raise HTTPException(409, 'Email is already registered')
     user = User(name=data.name.strip(), email=data.email, password_hash=ph.hash(data.password))
@@ -225,6 +232,8 @@ def register(data: Register, response: Response, db: Session = Depends(get_db)):
 
 @app.post('/api/login', dependencies=[Depends(require_csrf)])
 def login(data: Credentials, response: Response, db: Session = Depends(get_db)):
+    if supabase_auth.provider() != 'local':
+        raise HTTPException(403, 'Use email-code authentication')
     user = db.scalar(select(User).where(User.email == data.email))
     try:
         if not user or not ph.verify(user.password_hash, data.password):
@@ -236,6 +245,8 @@ def login(data: Credentials, response: Response, db: Session = Depends(get_db)):
 
 @app.post('/api/logout', dependencies=[Depends(require_csrf)])
 def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    if supabase_auth.provider() == 'supabase':
+        raise HTTPException(403, 'Use /api/auth/logout')
     value = request.cookies.get('udhaar_session')
     if value:
         row = db.get(LoginSession, digest(value))
