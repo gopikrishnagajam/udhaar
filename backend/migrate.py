@@ -77,10 +77,10 @@ def baseline_database(database_engine=engine, schema=DATABASE_SCHEMA):
         tables = set(sa.inspect(connection).get_table_names(schema=schema))
         if 'alembic_version' in tables:
             raise RuntimeError('This database is already versioned; use upgrade instead')
-        if not TABLES.issubset(tables):
-            raise RuntimeError('Baseline requires all nine original Udhaar tables; no changes were applied')
         config = configuration(connection, schema)
         frozen = ScriptDirectory.from_config(config).get_revision(INITIAL).module.initial_metadata(None if schema == 'public' else schema)
+        if not {table.name for table in frozen.tables.values()}.issubset(tables):
+            raise RuntimeError('Baseline requires all nine original Udhaar tables; no changes were applied')
         if schema_differences(connection, schema, frozen):
             raise RuntimeError('Existing tables do not match the original schema; baseline refused without changing data')
         command.stamp(config, INITIAL)

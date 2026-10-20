@@ -9,6 +9,7 @@ let authConfig = {provider:'local', configured:true}, authEmail = '', authName =
 const otpCooldowns = new Map();
 let authSubmitting = false;
 let verifyRetryUntil = 0;
+let inbox = [], inboxPolling = false;
 
 function updateOtpControls() {
  const form=$('#otp-form');if(!form)return;
@@ -44,6 +45,7 @@ async function readApiResponse(resp) {
   return body;
 }
 function clearSignedInState() {
+  inbox=[];
   authConfig.has_session=false;user=null;records=[];activeRecord=null;shareLink='';tab='ALL';otpSent=false;authName='';notice='';
   $$('.modal-backdrop, .toast').forEach(el=>el.remove());
 }
@@ -53,7 +55,7 @@ function sessionExpired() {
 }
 async function api(path, options = {}, retried = false) {
   const resp = await fetch(path, {credentials:'same-origin', ...options, headers: {...(options.body ? {'Content-Type':'application/json'} : {}), ...(options.method && options.method !== 'GET' ? {'X-CSRF-Token':csrf} : {}), ...(options.headers || {})}});
-  const protectedRequest=path==='/api/me'||path==='/api/records'||path.startsWith('/api/records/');
+  const protectedRequest=/^\/api\/(me|records|inbox|app-invites)(\/|$)/.test(path);
   if(resp.status===401 && authConfig.provider==='supabase' && protectedRequest) {
     if(!retried && authConfig.has_session) {
       // Share the parsed result too: a Response body can only be consumed once.
@@ -173,6 +175,7 @@ function topLayout(content) {
    <button data-tab="ALL" class="nav-link ${tab==='ALL'?'active':''}">${icon('grid',19)} Overview</button>
    <button data-tab="OFF" class="nav-link ${tab==='OFF'?'active':''}">${icon('lock',19)} Off the Record <span class="nav-count">${records.filter(r=>r.mode==='OFF').length}</span></button>
    <button data-tab="ON" class="nav-link ${tab==='ON'?'active':''}">${icon('users',19)} On the Record <span class="nav-count">${records.filter(r=>r.mode==='ON').length}</span></button>
+   <button data-tab="INBOX" class="nav-link ${tab==='INBOX'?'active':''}">${icon('check',19)} Acknowledgments <span class="nav-count" id="inbox-count">${inbox.filter(r=>r.invitation_state==='PENDING').length}</span></button>
    </nav><button id="invite-friends" class="btn btn-secondary">${icon('link',17)} Invite friends</button><div class="sidebar-spacer"></div><div class="sidebar-tip">${icon('spark',19)}<strong>Just a little reminder</strong><p>A record today saves an awkward conversation tomorrow.</p></div>
    <div class="sidebar-user"><span class="avatar">${esc((user.name||'U').slice(0,1).toUpperCase())}</span><span class="sidebar-username"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small></span><button title="Sign out" aria-label="Sign out" id="logout">${icon('logout',19)}</button></div>
  </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark">${icon('package',19)}</span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
@@ -211,7 +214,25 @@ function dashboard() {
  $$('[data-filter]').forEach(b=>b.onclick=()=>{tab=b.dataset.filter;render()});
  $('#new-record').onclick=openNew;
 }
-function render(){ if (!user) authScreen();else dashboard();renderNotice() }
+function render(){ if (!user) authScreen();else if(tab==='INBOX') inboxDashboard();else dashboard();renderNotice() }
+
+function inboxDashboard() {
+ topLayout(`<header class="pagehead"><div class="headerline"><div><h1>Your acknowledgments.</h1><p>Review loans shared with you and track their returns.</p></div><button id="refresh-inbox" class="btn btn-secondary">Refresh</button></div></header><section class="record-list">${inbox.length?inbox.map(r=>`<button class="record-card" data-invitation="${esc(r.invitation_id)}"><span class="item-icon">${icon('package',23)}</span><span class="record-main"><strong>${esc(r.item_name)}</strong><span>${esc(r.owner_name)} ${r.direction==='LENT'?'lent to you':'borrowed from you'} · ${r.quantity} item(s)</span></span>${ackBadge(r)}${icon('chevron',19)}</button>`).join(''):'<div class="empty"><h3>All caught up.</h3><p>Loans shared with your account will appear here.</p></div>'}</section>`);
+ $$('[data-invitation]').forEach(b=>b.onclick=()=>openInbox(b.dataset.invitation));
+ $('#refresh-inbox').onclick=async()=>{try{await loadRecords()}catch(err){toast(err.message)}};
+}
+
+async function openInbox(id) {
+ let r;try{r=await api(`/api/inbox/${id}`)}catch(err){toast(err.message);return}
+ const el=modal(`<div class="modal-eyebrow">SHARED WITH YOU</div><h2>${esc(r.item_name)}</h2><p>${esc(r.owner_name)} ${r.direction==='LENT'?'lent this to you':'borrowed this from you'}. Review the details before acknowledging.</p><div class="detail-summary"><div><small>Quantity</small><strong>${r.quantity}</strong></div><div><small>Loan date</small><strong class="small-strong">${prettyDate(r.loan_date)}</strong></div><div><small>Due date</small><strong class="small-strong">${prettyDate(r.due_date)}</strong></div></div>${acknowledgmentSummary(r)}
+ ${r.invitation_state==='PENDING'?`<div class="detail-actions"><button id="inbox-accept" class="btn btn-primary">${r.direction==='LENT'?'I took / borrowed this item':'I gave / lent this item'}</button><button id="inbox-decline" class="btn btn-secondary">Decline</button></div>`:`<p>${r.outstanding_quantity} of ${r.quantity} item(s) outstanding.</p>${r.pending_quantity?`<p>${r.pending_quantity} awaiting return acknowledgment.</p>`:''}${r.outstanding_quantity>r.pending_quantity?'<button id="inbox-return" class="btn btn-primary">'+(r.direction==='BORROWED'?'Acknowledge item returned':'Report item returned')+'</button>':''}${r.returns.filter(x=>x.status==='PENDING'&&r.direction==='BORROWED').map(x=>`<div class="return-row"><strong>${x.quantity} item(s) returned</strong><button class="btn btn-small" data-inbox-confirm="${esc(x.id)}">Acknowledge return</button></div>`).join('')}`}
+ <p class="fine-print">This request is addressed to your account. Available until ${prettyDate(r.link_expires_at.slice(0,10))}.</p><p id="inbox-error" class="form-error" role="alert"></p>`);
+ const action=async(path,data,reopen=true)=>{const buttons=$$('button',el);buttons.forEach(b=>b.disabled=true);try{await send(`/api/inbox/${id}${path}`,data);el.remove();await loadRecords();if(reopen)await openInbox(id);else toast('Request declined.')}catch(err){$('#inbox-error',el).textContent=err.message}finally{buttons.forEach(b=>b.disabled=false)}};
+ $('#inbox-accept',el)?.addEventListener('click',()=>action('/respond',{accept:true}));
+ $('#inbox-decline',el)?.addEventListener('click',()=>action('/respond',{accept:false},false));
+ $('#inbox-return',el)?.addEventListener('click',()=>{el.remove();openReturn(r,`/api/inbox/${id}`,()=>openInbox(id))});
+ $$('[data-inbox-confirm]',el).forEach(b=>b.onclick=()=>action(`/returns/${b.dataset.inboxConfirm}/confirm`,{}));
+}
 function modal(html) {
  const el=document.createElement('div'); el.className='modal-backdrop'; el.innerHTML=`<div class="modal" role="dialog" aria-modal="true"><button class="close-modal" aria-label="Close">${icon('close',21)}</button>${html}</div>`;
  document.body.appendChild(el);el.addEventListener('click',e=>{if(e.target===el)el.remove()});$('.close-modal',el).onclick=()=>el.remove();document.addEventListener('keydown',function escape(e){if(e.key==='Escape'){el.remove();document.removeEventListener('keydown',escape)}},{once:true});return el;
@@ -223,25 +244,28 @@ function openNew(){
  <label class="field">Category<select name="category"><option>Tools</option><option>Books</option><option>Electronics</option><option>Documents</option><option>Clothing</option><option>Equipment</option><option>Other</option></select></label><label class="field">Quantity<input name="quantity" type="number" required min="1" max="100000" value="1" /></label>
  <label class="field">Date lent / borrowed<input name="loan_date" type="date" required value="${today()}" /></label><label class="field">Expected return <span>(optional)</span><input name="due_date" type="date" /></label>
  <label class="field wide">A note to yourself <span>(optional)</span><textarea name="notes" rows="2" maxlength="2000" placeholder="Any details worth remembering…"></textarea></label></div>
- <div class="form-subtitle">How would you like to save it?</div><div class="mode-options"><label class="mode-option"><input type="radio" name="mode" value="OFF" checked/><span class="mode-option-content">${icon('lock',21)}<strong>Off the Record</strong><small>Private. Only you can see it.</small></span></label><label class="mode-option"><input type="radio" name="mode" value="ON"/><span class="mode-option-content">${icon('users',21)}<strong>On the Record</strong><small>Share a link for acknowledgment and returns.</small></span></label></div>
- <div class="modal-actions"><button type="button" class="btn btn-quiet" id="cancel-new">Cancel</button><button class="btn btn-primary" type="submit">Save record ${icon('arrow',16)}</button></div><p class="form-error" id="new-error"></p></form>`);
+ <div class="form-subtitle">How would you like to save it?</div><div class="mode-options"><label class="mode-option"><input type="radio" name="mode" value="OFF" checked/><span class="mode-option-content">${icon('lock',21)}<strong>Off the Record</strong><small>Private. Only you can see it.</small></span></label><label class="mode-option"><input type="radio" name="mode" value="ON"/><span class="mode-option-content">${icon('users',21)}<strong>On the Record</strong><small>Request acknowledgment in app or by email.</small></span></label></div>
+ <div id="record-email-field" hidden><label class="field">Other person's email<input name="contact_email" type="email" maxlength="255" autocomplete="email" disabled /></label><p class="fine-print">Existing users receive an acknowledgment request in the app. Others receive an email link they can use without an account.</p></div>
+ <div class="modal-actions"><button type="button" class="btn btn-quiet" id="cancel-new">Cancel</button><button class="btn btn-primary" type="submit">Save record ${icon('arrow',16)}</button></div><p class="form-error" id="new-error" role="alert"></p></form>`);
  $('#cancel-new',el).onclick=()=>el.remove();
- $('#record-form',el).onsubmit=async(e)=>{e.preventDefault();const f=e.target, values=Object.fromEntries(new FormData(f));values.quantity=Number(values.quantity);if(!values.due_date)values.due_date=null;try{const rec=await send('/api/records',values);el.remove();await loadRecords();toast('Record saved.');openDetails(rec.id);}catch(err){$('#new-error',el).textContent=err.message}};
+ $$('input[name=mode]',el).forEach(input=>input.onchange=()=>{const on=$('input[name=mode]:checked',el).value==='ON';$('#record-email-field',el).hidden=!on;const email=$('input[name=contact_email]',el);email.disabled=!on;email.required=on;});
+ $('#record-form',el).onsubmit=async(e)=>{e.preventDefault();const f=e.target, btn=$('button[type=submit]',f), values=Object.fromEntries(new FormData(f));btn.disabled=true;values.quantity=Number(values.quantity);if(!values.due_date)values.due_date=null;try{const rec=await send('/api/records',values);el.remove();await loadRecords();toast(rec.invitation_delivery==='IN_APP'?'Record saved. Acknowledgment requested in their inbox.':rec.invitation_delivery==='EMAIL'?'Record saved. Acknowledgment email sent.':'Record saved.');openDetails(rec.id);}catch(err){$('#new-error',el).textContent=err.message}finally{btn.disabled=false}};
 }
 async function openDetails(id) {
  let r;try{r=await api(`/api/records/${id}`)}catch(err){toast(err.message);return}
  const modalEl=modal(`<div class="detail-top"><div class="modal-eyebrow">${labelMode(r.mode).toUpperCase()}</div><h2>${esc(r.item_name)}</h2><p>${r.direction==='LENT'?'Lent to':'Borrowed from'} <strong>${esc(r.contact_name)}</strong></p><div class="detail-tags">${ackBadge(r)}<span class="badge badge-muted">${esc(r.category)}</span></div></div>
  <div class="detail-summary"><div><small>Original quantity</small><strong>${r.quantity}</strong></div><div><small>Still outstanding</small><strong>${r.outstanding_quantity}</strong></div><div><small>Due date</small><strong class="small-strong">${prettyDate(r.due_date)}</strong></div></div>
  ${acknowledgmentSummary(r)}
+ ${r.acknowledgment_email?`<p class="fine-print">Acknowledgment requested from ${esc(r.acknowledgment_email)} ${r.invitation_delivery==='IN_APP'?'in their app inbox':'by email'}.</p>`:''}
  ${r.notes?`<div class="detail-notes"><strong>Note to self</strong><p>${esc(r.notes)}</p></div>`:''}
  <div class="detail-actions">${r.mode==='OFF'||(r.mode==='ON'&&r.acknowledgment==='NONE') ? `<button id="edit-action" class="btn btn-secondary">Edit details</button>` : ''}${r.mode==='OFF' && r.settlement!=='RETURNED'?`<button id="share-action" class="btn btn-secondary">${icon('link',17)} Move to On the Record</button>`:''}
- ${r.mode==='ON'?`<button id="share-action" class="btn btn-secondary">${icon('link',17)} ${r.acknowledgment==='NONE'?'Share loan link':'Replace loan link'}</button>`:''}
+ ${r.mode==='ON'&&r.returned_quantity===0?`<button id="share-action" class="btn btn-secondary">${icon('link',17)} ${r.acknowledgment==='NONE'?'Request acknowledgment':'Replace acknowledgment request'}</button>`:''}
  ${r.outstanding_quantity>r.pending_quantity && (r.mode==='OFF'||r.acknowledgment==='CONFIRMED')?`<button id="return-action" class="btn btn-primary">${icon('check',17)} ${r.mode==='OFF'?'Mark returned':r.direction==='LENT'?'Acknowledge item returned':'Request return acknowledgment'}</button>`:''}</div>
- ${r.mode==='ON' ? `<p class="fine-print">${r.acknowledgment==='NONE'?'No loan link created yet.':'Shared-link acknowledgment does not verify someone’s identity.'} Loan links expire after 30 days. Replacing a link invalidates the old one and requires acknowledgment again.</p>` : '<p class="fine-print">Only you can see this record. You can choose to share it later.</p>'}
+ ${r.mode==='ON' ? `<p class="fine-print">Requests expire after 30 days. Replacing a request invalidates the old one and requires acknowledgment again. Guest links can be used without an account.</p>` : '<p class="fine-print">Only you can see this record. You can choose to share it later.</p>'}
  ${r.returns.length ? `<h3 class="small-header">Return activity</h3><div class="return-list">${r.returns.map(a=>`<div class="return-row"><div><strong>${a.quantity} item(s)</strong><span>${a.status==='PENDING'?'Awaiting return acknowledgment':a.status==='CONFIRMED'?'Return acknowledged':'Cancelled'}</span></div>${a.status==='PENDING' && r.direction==='LENT'?`<button class="btn btn-small confirm-return" data-return="${a.id}">Acknowledge return</button>`:''}</div>`).join('')}</div>`:''}
  <h3 class="small-header">History</h3><div class="timeline">${r.events.map(a=>`<div class="timeline-entry"><i></i><div><strong>${esc(a.description)}</strong><small>${new Date(a.created_at).toLocaleString()}</small></div></div>`).join('')}</div>`);
  $('#edit-action',modalEl)?.addEventListener('click',()=>{modalEl.remove();openEdit(r)});
- $('#share-action',modalEl)?.addEventListener('click',async()=>{try{const data=await send(`/api/records/${r.id}/share`,{});modalEl.remove();await loadRecords();showShare(window.location.origin+data.path)}catch(err){toast(err.message)}});
+ $('#share-action',modalEl)?.addEventListener('click',()=>{modalEl.remove();requestAcknowledgment(r)});
  $('#return-action',modalEl)?.addEventListener('click',()=>{modalEl.remove();openReturn(r)});
  $$('.confirm-return',modalEl).forEach(btn=>btn.onclick=async()=>{try{await send(`/api/records/${r.id}/returns/${btn.dataset.return}/confirm`,{});modalEl.remove();await loadRecords();toast('Return confirmed.');openDetails(r.id)}catch(err){toast(err.message)}});
 }
@@ -255,22 +279,27 @@ function openEdit(r) {
  $('#edit-form',el).onsubmit=async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.target));if(!data.due_date)data.due_date=null;
  try{await send(`/api/records/${r.id}`,data,'PATCH');el.remove();await loadRecords();toast('Record updated.');openDetails(r.id)}catch(err){$('#edit-error',el).textContent=err.message}};
 }
-function showShare(url) {
- const el=modal(`<div class="share-illustration">${icon('link',30)}</div><div class="modal-eyebrow">SHARE LOAN LINK</div><h2>Share this loan.</h2><p>Copy and send this link through your messaging app. Anyone holding it can acknowledge and use the same link for returns without signing up.</p><label class="field">Loan link<input id="share-url" value="${esc(url)}" readonly /></label><button id="copy-share" class="btn btn-primary full">Copy loan link ${icon('link',17)}</button><div class="privacy-hint">You are responsible for who you send this link to. Anyone with it can view this loan, acknowledge it, and act as the other person for returns. The link expires in 30 days. Identity is not verified.</div>`);
- $('#copy-share',el).onclick=async()=>{try{await navigator.clipboard.writeText(url);toast('Loan link copied.')}catch {$('#share-url',el).focus();$('#share-url',el).select();toast('Select the link and copy it.')}};
+function requestAcknowledgment(r) {
+ const el=modal(`<div class="modal-eyebrow">ON THE RECORD</div><h2>Request acknowledgment</h2><p>Enter the other person's email. Existing users receive a request in the app; others receive a guest link by email. No account is required to use that link.</p><form id="share-form"><label class="field">Email address<input name="email" type="email" maxlength="255" required autocomplete="email" value="${esc(r.acknowledgment_email||r.contact_email||'')}" /></label><p class="fine-print">This replaces any previous request. Loan acknowledgment emails do not count toward your daily app invitations.</p><button class="btn btn-primary full" type="submit">Send acknowledgment request</button><p class="form-error" id="share-error" role="alert"></p></form>`);
+ $('#share-form',el).onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',el);btn.disabled=true;try{const result=await send(`/api/records/${r.id}/share`,Object.fromEntries(new FormData(e.target)));el.remove();await loadRecords();toast(result.delivery==='IN_APP'?'Request delivered to their acknowledgment inbox.':'Acknowledgment email sent.');openDetails(r.id)}catch(err){$('#share-error',el).textContent=err.message}finally{btn.disabled=false}};
 }
-function showSignupShare() {
- const url = window.location.origin + '/signup';
- const el=modal(`<div class="modal-eyebrow">INVITE FRIENDS</div><h2>Share Udhaar.</h2><p>Copy this signup link and send it through your messaging app. It lets friends create their own account.</p><label class="field">Signup link<input id="signup-url" value="${esc(url)}" readonly /></label><button id="copy-signup" class="btn btn-primary full">Copy signup link ${icon('link',17)}</button>`);
- $('#copy-signup',el).onclick=async()=>{try{await navigator.clipboard.writeText(url);toast('Signup link copied.')}catch{$('#signup-url',el).focus();$('#signup-url',el).select();toast('Select the link and copy it.')}};
+async function showSignupShare() {
+ let quota;try{quota=await api('/api/app-invites')}catch(err){toast(err.message);return}
+ const el=modal(`<div class="modal-eyebrow">INVITE FRIENDS</div><h2>Invite someone to Udhaar.</h2><p>${quota.remaining} of 2 invitations available today. Resets ${new Date(quota.resets_at).toLocaleString()}. The daily limit uses UTC.</p><form id="app-invite-form"><label class="field">Email address<input name="email" type="email" required maxlength="255" autocomplete="email" /></label><button class="btn btn-primary full" type="submit" ${quota.remaining===0?'disabled':''}>Send invitation</button><p class="form-error" id="app-invite-error" role="alert"></p></form><p class="fine-print">Acknowledgment emails are separate and have no app-invite limit. A failed delivery reserves its slot; retrying it does not use another invitation.</p>${quota.invitations.map(inv=>`<div class="return-row"><div><strong>${esc(inv.email)}</strong><span>${inv.state==='SENT'?'Sent':'Delivery not confirmed'}</span></div>${inv.state!=='SENT'?`<button class="btn btn-small" data-retry-invite="${esc(inv.id)}">Retry delivery</button>`:''}</div>`).join('')}`);
+ const submit=async(path,data,btn)=>{btn.disabled=true;try{await send(path,data);el.remove();toast('Invitation sent.');await showSignupShare()}catch(err){$('#app-invite-error',el).textContent=err.message;el.remove();await showSignupShare();toast(err.message)}finally{btn.disabled=false}};
+ $('#app-invite-form',el).onsubmit=e=>{e.preventDefault();submit('/api/app-invites',Object.fromEntries(new FormData(e.target)),$('button[type=submit]',e.target))};
+ $$('[data-retry-invite]',el).forEach(btn=>btn.onclick=()=>submit(`/api/app-invites/${btn.dataset.retryInvite}/retry`,{},btn));
 }
-function openReturn(r){
+function openReturn(r, prefix=`/api/records/${r.id}`, reopen=()=>openDetails(r.id)){
  const available=r.outstanding_quantity-r.pending_quantity;
- const el=modal(`<div class="modal-eyebrow">RETURN TRACKING</div><h2>Update a return</h2><p>${esc(r.item_name)} — ${available} item(s) available to record as returned.</p><form id="return-form"><label class="field">Quantity returned<input type="number" name="quantity" required min="1" max="${available}" value="${available}" /></label><div class="privacy-hint">${r.mode==='OFF'?'This return will be marked complete in your private record.':r.direction==='LENT'?'You are the lender, so your confirmation completes this return.':'The lender must confirm receipt through their shared link.'}</div><div class="modal-actions"><button class="btn btn-quiet" type="button" id="cancel-return">Cancel</button><button class="btn btn-primary" type="submit">Save return</button></div><p class="form-error" id="return-error"></p></form>`);
+ const recipientView=prefix.startsWith('/api/inbox/');
+ const isLender=recipientView?r.direction==='BORROWED':r.direction==='LENT';
+ const el=modal(`<div class="modal-eyebrow">RETURN TRACKING</div><h2>Update a return</h2><p>${esc(r.item_name)} — ${available} item(s) available to record as returned.</p><form id="return-form"><label class="field">Quantity returned<input type="number" name="quantity" required min="1" max="${available}" value="${available}" /></label><div class="privacy-hint">${r.mode==='OFF'?'This return will be marked complete in your private record.':isLender?'You are the lender, so your confirmation completes this return.':'The lender must confirm receipt in their inbox or through their guest link.'}</div><div class="modal-actions"><button class="btn btn-quiet" type="button" id="cancel-return">Cancel</button><button class="btn btn-primary" type="submit">Save return</button></div><p class="form-error" id="return-error"></p></form>`);
  $('#cancel-return',el).onclick=()=>el.remove();
- $('#return-form',el).onsubmit=async e=>{e.preventDefault();try{const response=await send(`/api/records/${r.id}/returns`,{quantity:Number(new FormData(e.target).get('quantity'))});el.remove();await loadRecords();toast(response.status==='PENDING'?'Return proposed. Awaiting the lender.':'Return saved.');openDetails(r.id);}catch(err){$('#return-error',el).textContent=err.message}};
+ $('#return-form',el).onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',el);btn.disabled=true;try{const response=await send(`${prefix}/returns`,{quantity:Number(new FormData(e.target).get('quantity'))});el.remove();await loadRecords();toast(response.status==='PENDING'?'Return proposed. Awaiting the lender.':'Return saved.');reopen();}catch(err){$('#return-error',el).textContent=err.message}finally{btn.disabled=false}};
 }
-async function loadRecords(){records=await api('/api/records');render()}
+async function loadRecords(){const loaded=await Promise.all([api('/api/records'),api('/api/inbox')]);if(!user)return;[records,inbox]=loaded;render()}
+setInterval(async()=>{if(!user||document.hidden||inboxPolling)return;inboxPolling=true;try{const loaded=await api('/api/inbox');if(!user)return;inbox=loaded;const count=$('#inbox-count');if(count)count.textContent=inbox.filter(r=>r.invitation_state==='PENDING').length;if(tab==='INBOX'&&!$('.modal-backdrop'))inboxDashboard()}catch{}finally{inboxPolling=false}},30000);
 async function guestPage(token){
  const wrap = $('#app');
  async function load(){
@@ -281,7 +310,7 @@ async function guestPage(token){
   ${r.invitation_state==='PENDING'?`<p class="guest-question">1. Acknowledge the handover: ${r.direction==='LENT'?'did you take / borrow this item?':'did you give / lend this item?'}</p><div class="guest-buttons"><button id="accept-invite" class="btn btn-primary">${icon('check',18)} ${r.direction==='LENT'?'I took / borrowed this item':'I gave / lent this item'}</button><button id="decline-invite" class="btn btn-secondary">No, decline</button></div>`:`<div class="guest-confirmed">${icon('shield',20)} The item handover was acknowledged through this link. Return acknowledgment is separate; keep this link to complete it. Identity is not verified.</div>`}
   ${acknowledgmentSummary(r)}
   ${r.invitation_state==='ACCEPTED'?`<div class="guest-return"><h3>2. Return acknowledgment</h3><p>${r.outstanding_quantity===0?'All items returned. This loan is complete.':`${r.outstanding_quantity} of ${r.quantity} still outstanding`}</p>${r.pending_quantity?`<p>${r.pending_quantity} item(s) awaiting lender acknowledgment.</p>`:''}${r.outstanding_quantity > r.pending_quantity ?`<button id="guest-return" class="btn btn-secondary">${r.direction==='BORROWED'?'Acknowledge item returned':'Report item returned'}</button>`:''}${r.returns.filter(x=>x.status==='PENDING'&&r.direction==='BORROWED').map(x=>`<div class="return-row"><div><strong>${x.quantity} item(s)</strong><span>Borrower requested return confirmation</span></div><button data-guest-confirm="${x.id}" class="btn btn-small">Acknowledge return</button></div>`).join('')}</div>`:''}
-  <div class="guest-disclaimer">Anyone holding this link can view this loan and act as the other person for acknowledgment and returns. The sender is responsible for sharing it with the right person. Expires ${prettyDate(r.link_expires_at.slice(0,10))}.</div></div><div class="guest-footer">Udhaar — lend it, track it, get it back.</div></div>`;
+  <p class="fine-print">Want to track your own loans? <a href="/signup">Create a free Udhaar account</a> (optional). You can complete this acknowledgment and returns without registering.</p><div class="guest-disclaimer">Anyone holding this link can view this loan and act as the other person for acknowledgment and returns. The sender is responsible for sharing it with the right person. Expires ${prettyDate(r.link_expires_at.slice(0,10))}.</div></div><div class="guest-footer">Udhaar — lend it, track it, get it back.</div></div>`;
   $('#accept-invite')?.addEventListener('click',async()=>{try{await send(`/api/share/${token}/respond`,{accept:true});toast('Record acknowledged.');load()}catch(err){toast(err.message)}});
   $('#decline-invite')?.addEventListener('click',async()=>{try{await send(`/api/share/${token}/respond`,{accept:false});wrap.innerHTML='<div class="guest-wrap"><div class="guest-card"><div class="brand center">udhaar.</div><h2>Acknowledgment declined</h2><p>The record owner can see that you declined. No return or agreement was recorded.</p></div></div>'}catch(err){toast(err.message)}});
   $('#guest-return')?.addEventListener('click',()=>{

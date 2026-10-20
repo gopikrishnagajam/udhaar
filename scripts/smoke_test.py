@@ -1,4 +1,4 @@
-"""Exercise a running app. Creates one test account and completed loan per run.
+"""Exercise a running app. Creates two test accounts and a completed loan per run.
 
 Run: python scripts/smoke_test.py [http://localhost:8000]
 """
@@ -35,18 +35,21 @@ def main():
     email = f'smoke-{secrets.token_hex(8)}@example.com'
     password = secrets.token_urlsafe(24)
     owner.call('/api/register', {'name': 'Docker smoke test', 'email': email, 'password': password})
+    recipient_email = f'recipient-{secrets.token_hex(8)}@example.com'
+    guest.call('/api/register', {'name': 'Smoke recipient', 'email': recipient_email, 'password': password})
     record = owner.call('/api/records', {
-        'direction': 'LENT', 'mode': 'ON', 'contact_name': 'Link holder',
+        'direction': 'LENT', 'mode': 'ON', 'contact_name': 'Smoke recipient', 'contact_email': recipient_email,
         'item_name': 'Docker test book', 'quantity': 2, 'loan_date': date.today().isoformat(),
         'notes': 'This note must remain private',
     })
-    path = owner.call(f"/api/records/{record['id']}/share", {})['path']
-    assert 'notes' not in guest.call('/api' + path)
-    guest.call('/api' + path + '/respond', {'accept': True})
-    proposed = guest.call('/api' + path + '/returns', {'quantity': 2})
+    invitation = guest.call('/api/inbox')[0]
+    path = '/api/inbox/' + invitation['invitation_id']
+    assert 'notes' not in guest.call(path)
+    guest.call(path + '/respond', {'accept': True})
+    proposed = guest.call(path + '/returns', {'quantity': 2})
     assert proposed['status'] == 'PENDING'
     owner.call(f"/api/records/{record['id']}/returns/{proposed['id']}/confirm", {})
-    result = guest.call('/api' + path)
+    result = guest.call(path)
     assert result['handover_acknowledgment'] == 'CONFIRMED'
     assert result['return_acknowledgment'] == 'CONFIRMED'
     assert result['settlement'] == 'RETURNED'
@@ -54,7 +57,7 @@ def main():
     owner.call('/api/login', {'email': email, 'password': password})
     assert owner.call('/api/me')['email'] == email
     assert owner.call(f"/api/records/{record['id']}")['settlement'] == 'RETURNED'
-    print('PASS: health, signup, private notes, anonymous handover, return acknowledgment, logout and login')
+    print('PASS: health, signup, private notes, recipient inbox, handover, return acknowledgment, logout and login')
     print('Completed test record:', record['id'])
 
 

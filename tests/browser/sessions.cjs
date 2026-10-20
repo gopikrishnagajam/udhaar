@@ -33,6 +33,7 @@ async function scenario(options, task) {
     let status = 200, data = {};
     if (path === '/api/csrf') data = {csrf: 'test-csrf'};
     else if (path === '/api/auth/config') data = {provider: 'supabase', configured: true, has_session: state.hasSession};
+    else if (path === '/api/inbox') data = [];
     else if (path === '/api/me' || path.startsWith('/api/records')) {
       if (state.valid && !state.logout) {
         data = path === '/api/me' ? {id: 'test-user', name: 'Session Test', email: 'test@example.com'} : [];

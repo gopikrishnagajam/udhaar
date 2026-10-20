@@ -1,5 +1,7 @@
 """Configuration, real DDL, legacy adoption, and PostgreSQL access boundaries."""
 import os
+import hashlib
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -9,7 +11,15 @@ from sqlalchemy.engine import make_url
 from backend.database import database_engine, database_settings
 from backend.migrate import (baseline_database, ensure_database_current,
                              schema_differences, upgrade_database)
-from backend.models import Base, User
+from backend.models import Base, User, Invitation, AppInvitation
+from alembic import command
+from backend.migrate import configuration
+from alembic.script import ScriptDirectory
+
+
+def create_original_schema(engine):
+    frozen = ScriptDirectory.from_config(configuration()).get_revision('0001_initial').module.initial_metadata()
+    frozen.create_all(engine)
 
 
 @pytest.fixture
@@ -94,9 +104,33 @@ def test_fresh_migrations_match_models_and_repeat_without_losing_data(isolated_d
         assert connection.scalar(sa.select(sa.func.count()).select_from(User)) == 1
 
 
+def test_email_upgrade_preserves_existing_loans_and_guest_links(isolated_database):
+    engine, schema = isolated_database
+    instant = datetime.now(timezone.utc)
+    user_id, contact_id, record_id, invitation_id = [str(uuid4()) for _ in range(4)]
+    token_hash = hashlib.sha256(b'existing-private-link').hexdigest()
+    frozen = ScriptDirectory.from_config(configuration()).get_revision('0001_initial').module.initial_metadata()
+    with engine.begin() as connection:
+        command.upgrade(configuration(connection, schema), '0002_private_access')
+        connection.execute(frozen.tables['users'].insert().values(id=user_id, name='Existing', email='old@example.com', password_hash='', created_at=instant))
+        connection.execute(frozen.tables['contacts'].insert().values(id=contact_id, owner_id=user_id, name='Guest'))
+        connection.execute(frozen.tables['records'].insert().values(id=record_id, owner_id=user_id,
+            contact_id=contact_id, kind='ITEM', direction='LENT', mode='ON', acknowledgment='PENDING',
+            loan_date=instant.date(), notes='Private', created_at=instant, updated_at=instant))
+        connection.execute(frozen.tables['item_loans'].insert().values(record_id=record_id, item_name='Existing book', category='Books', quantity=1))
+        connection.execute(frozen.tables['invitations'].insert().values(id=invitation_id, record_id=record_id,
+            token_hash=token_hash, state='PENDING', expires_at=instant+timedelta(days=30), created_at=instant))
+    upgrade_database(engine, schema)
+    with engine.connect() as connection:
+        inv = connection.execute(sa.select(Invitation.__table__)).mappings().one()
+        assert inv['token_hash'] == token_hash and inv['state'] == 'PENDING'
+        assert inv['delivery'] == 'LINK' and inv['recipient_user_id'] is None
+        assert schema_differences(connection, schema) == []
+
+
 def test_existing_database_baseline_preserves_users_and_requires_explicit_adoption(isolated_database):
     engine, schema = isolated_database
-    Base.metadata.create_all(engine)
+    create_original_schema(engine)
     with engine.begin() as connection:
         connection.execute(sa.insert(User).values(id=str(uuid4()), name='Existing', email='existing@example.com', password_hash=''))
     with pytest.raises(RuntimeError, match='unversioned'):
@@ -120,7 +154,7 @@ def test_partial_schema_cannot_be_baselined(isolated_database):
 
 def test_schema_drift_is_refused_without_stamping(isolated_database):
     engine, schema = isolated_database
-    Base.metadata.create_all(engine)
+    create_original_schema(engine)
     with engine.begin() as connection:
         quote = connection.dialect.identifier_preparer.quote_identifier
         name = f'{quote(schema)}.users' if schema else 'users'
@@ -165,11 +199,17 @@ def test_postgres_rls_hides_rows_from_non_owner_roles(isolated_database):
             connection.exec_driver_sql(f'CREATE ROLE "{role}" NOLOGIN')
             connection.exec_driver_sql(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"')
             connection.exec_driver_sql(f'GRANT SELECT ON "{schema}".users TO "{role}"')
+            user_id = connection.scalar(sa.select(User.id))
+            connection.execute(sa.insert(AppInvitation).values(id=str(uuid4()), sender_id=user_id,
+                email='private-recipient@example.com', invite_day=datetime.now(timezone.utc).date(), slot=1, state='SENT'))
+            connection.exec_driver_sql(f'GRANT SELECT ON "{schema}".app_invitations TO "{role}"')
         with engine.begin() as connection:
             connection.exec_driver_sql(f'SET LOCAL ROLE "{role}"')
             assert connection.exec_driver_sql(f'SELECT count(*) FROM "{schema}".users').scalar_one() == 0
+            assert connection.exec_driver_sql(f'SELECT count(*) FROM "{schema}".app_invitations').scalar_one() == 0
     finally:
         with engine.begin() as connection:
             connection.exec_driver_sql(f'REVOKE ALL ON "{schema}".users FROM "{role}"')
+            connection.exec_driver_sql(f'REVOKE ALL ON "{schema}".app_invitations FROM "{role}"')
             connection.exec_driver_sql(f'REVOKE ALL ON SCHEMA "{schema}" FROM "{role}"')
             connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')

@@ -14,9 +14,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, func, text
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
-from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, now
-from . import supabase_auth
+from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, AppInvitation, now
+from . import supabase_auth, email_delivery
 from .migrate import ensure_database_current
 
 @asynccontextmanager
@@ -63,8 +64,15 @@ class RecordCreate(BaseModel):
     due_date: date | None = None
     notes: str = Field(default='', max_length=2000)
 
+    @field_validator('contact_email')
+    @classmethod
+    def valid_contact_email(cls, value):
+        return email_delivery.normalize_email(value) if value else None
+
     @model_validator(mode='after')
     def check_dates(self):
+        if self.mode == 'ON' and not self.contact_email:
+            raise ValueError('An email address is required for On the Record')
         if self.due_date and self.due_date < self.loan_date:
             raise ValueError('Return date must be on or after the lending date')
         return self
@@ -76,6 +84,14 @@ class RecordEdit(BaseModel):
 
 class ShareResponse(BaseModel):
     accept: bool
+
+class InviteEmail(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+    @field_validator('email')
+    @classmethod
+    def valid_email(cls, value):
+        return email_delivery.normalize_email(value)
 
 class QuantityBody(BaseModel):
     quantity: int = Field(ge=1, le=100000)
@@ -135,7 +151,7 @@ def summary(rec: Record):
                                   'CONFIRMED' if left == 0 else
                                   'PENDING' if pending else
                                   'PARTIAL' if confirmed else 'NONE'),
-        'contact_name': rec.contact.name,
+        'contact_name': rec.contact.name, 'contact_email': rec.contact.email,
         'item_name': rec.item.item_name, 'category': rec.item.category, 'quantity': rec.item.quantity,
         'loan_date': rec.loan_date.isoformat(), 'due_date': rec.due_date.isoformat() if rec.due_date else None,
         'notes': rec.notes, 'returned_quantity': confirmed, 'pending_quantity': pending,
@@ -157,12 +173,81 @@ def detail(rec: Record):
 
 def invited(db: Session, token: str):
     inv = db.scalar(select(Invitation).where(Invitation.token_hash == digest(token)))
-    if not inv or inv.state not in {'PENDING', 'ACCEPTED'} or utc(inv.expires_at) <= now():
+    if not inv or inv.delivery == 'IN_APP':
         raise HTTPException(404, 'Loan link unavailable or expired')
-    rec = db.get(Record, inv.record_id)
+    return available_invitation(db, inv)
+
+
+def available_invitation(db, inv):
+    # Serialize handover responses and link replacement on the same loan row.
+    rec = db.scalar(select(Record).where(Record.id == inv.record_id).with_for_update())
+    db.refresh(inv)
+    if inv.state not in {'PENDING', 'ACCEPTED'} or utc(inv.expires_at) <= now():
+        raise HTTPException(404, 'Loan link unavailable or expired')
     if not rec or rec.mode != 'ON':
         raise HTTPException(404, 'Record unavailable')
     return inv, rec
+
+
+def recipient_invitation(db, user, invitation_id):
+    inv = db.scalar(select(Invitation).where(Invitation.id == invitation_id, Invitation.recipient_user_id == user.id))
+    if not inv:
+        raise HTTPException(404, 'Acknowledgment request not found')
+    return available_invitation(db, inv)
+
+
+def recipient_view(db, inv, rec):
+    result = detail(rec)
+    result.pop('notes', None)
+    result.pop('events', None)
+    result.pop('contact_email', None)
+    result.update(owner_name=db.get(User, rec.owner_id).name, invitation_id=inv.id,
+                  invitation_state=inv.state, link_expires_at=inv.expires_at.isoformat())
+    return result
+
+
+def deliver_record(db, rec, user, email):
+    if email == user.email.casefold():
+        raise HTTPException(422, 'Enter the other person\'s email address')
+    recipient = db.scalar(select(User).where(func.lower(User.email) == email))
+    for old in db.scalars(select(Invitation).where(Invitation.record_id == rec.id, Invitation.state.in_(['PENDING', 'ACCEPTED']))):
+        old.state = 'REVOKED'
+    raw = secrets.token_urlsafe(36)
+    inv = Invitation(record_id=rec.id, token_hash=digest(raw), recipient_email=email,
+                     recipient_user_id=recipient.id if recipient else None,
+                     delivery='IN_APP' if recipient else 'EMAIL', expires_at=now() + timedelta(days=30))
+    db.add(inv)
+    rec.mode = 'ON'
+    rec.acknowledgment = 'PENDING'
+    event(db, rec, 'OWNER', 'INVITED', 'Acknowledgment requested in app' if recipient else 'Acknowledgment link emailed (identity unverified)')
+    db.flush()
+    path = f'/share/{raw}'
+    if not recipient:
+        url = email_delivery.public_url(path)
+        signup_url = email_delivery.public_url('/signup')
+        email_delivery.send_email(email, 'Please acknowledge an Udhaar loan',
+            f'{user.name} has shared an item loan with you on Udhaar.\n\n'
+            f'Review the loan and accept or decline here:\n{url}\n\n'
+            'No account is needed. Keep this private link for return acknowledgments too. '
+            'It expires in 30 days. Only acknowledge a loan you recognize.\n\n'
+            f'Optional: create your own Udhaar account at {signup_url}', f'loan-invite/{inv.id}')
+    return {'delivery': inv.delivery, 'expires_at': inv.expires_at.isoformat(), 'status': 'PENDING'}
+
+
+def record_response(db, inv, rec, accept, authenticated=False):
+    if inv.state != 'PENDING' or rec.acknowledgment != 'PENDING':
+        raise HTTPException(409, 'Acknowledgment request already answered')
+    inv.state = 'ACCEPTED' if accept else 'DECLINED'
+    rec.acknowledgment = 'CONFIRMED' if accept else 'DECLINED'
+    if accept:
+        handover = 'Item taken / borrowed' if rec.direction == 'LENT' else 'Item given / lent'
+        suffix = 'by signed-in recipient' if authenticated else 'through loan link (identity unverified)'
+        event(db, rec, 'GUEST', 'ACKNOWLEDGED', f'{handover} acknowledged {suffix}')
+    else:
+        event(db, rec, 'GUEST', 'DECLINED', 'Recipient declined to acknowledge this record')
+    inv.responded_at = now()
+    db.commit()
+    return {'acknowledgment': rec.acknowledgment}
 
 def ensure_share_accepted(inv: Invitation, rec: Record):
     if inv.state != 'ACCEPTED' or rec.acknowledgment != 'CONFIRMED':
@@ -217,6 +302,70 @@ def csrf_cookie(request: Request, response: Response):
 @app.get('/api/me')
 def whoami(user: User = Depends(auth_user)):
     return {'id': user.id, 'name': user.name, 'email': user.email}
+
+
+@app.get('/api/app-invites')
+def app_invite_quota(user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    day = now().date()
+    invitations = db.scalars(select(AppInvitation).where(AppInvitation.sender_id == user.id, AppInvitation.invite_day == day)
+                             .order_by(AppInvitation.slot)).all()
+    return {'limit': 2, 'remaining': 2 - len(invitations),
+            'resets_at': datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat(),
+            'invitations': [{'id': inv.id, 'email': inv.email, 'state': inv.state} for inv in invitations]}
+
+
+def send_app_invitation(db, inv, user):
+    # Commit the daily reservation BEFORE contacting Resend. Even a timeout or
+    # process crash cannot release a slot and accidentally permit a third invite.
+    try:
+        inv.message_id = email_delivery.send_email(inv.email, 'You are invited to Udhaar',
+            f'{user.name} invited you to Udhaar, a place to track the things you lend and borrow.\n\n'
+            f'Create your account here:\n{email_delivery.public_url("/signup")}\n\n'
+            'Joining is optional. You can ignore this invitation if you are not interested.', f'app-invite/{inv.id}')
+    except HTTPException:
+        inv.state = 'FAILED'
+        db.commit()
+        raise
+    inv.state = 'SENT'
+    db.commit()
+    return {'id': inv.id, 'state': inv.state, 'message': 'Invitation sent'}
+
+
+@app.post('/api/app-invites', dependencies=[Depends(require_csrf)])
+def invite_to_app(body: InviteEmail, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    email_delivery.public_url('/signup')
+    if body.email == user.email.casefold():
+        raise HTTPException(422, 'Enter someone else\'s email address')
+    db.scalar(select(User).where(User.id == user.id).with_for_update())
+    day = now().date()
+    existing = db.scalars(select(AppInvitation).where(AppInvitation.sender_id == user.id, AppInvitation.invite_day == day)).all()
+    if any(inv.email == body.email for inv in existing):
+        raise HTTPException(409, 'This email was already invited today. Retry its existing invitation if delivery failed')
+    used = {inv.slot for inv in existing}
+    slot = next((value for value in (1, 2) if value not in used), None)
+    if slot is None:
+        raise HTTPException(429, 'You have used your two app invitations today. The limit resets at midnight UTC')
+    inv = AppInvitation(sender_id=user.id, email=body.email, invite_day=day, slot=slot)
+    db.add(inv)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(429, 'Daily invitation slots changed. Refresh and try again') from None
+    return send_app_invitation(db, inv, user)
+
+
+@app.post('/api/app-invites/{invitation_id}/retry', dependencies=[Depends(require_csrf)])
+def retry_app_invitation(invitation_id: str, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    inv = db.scalar(select(AppInvitation).where(AppInvitation.id == invitation_id, AppInvitation.sender_id == user.id).with_for_update())
+    if not inv:
+        raise HTTPException(404, 'Invitation not found')
+    if inv.state == 'SENT':
+        return {'id': inv.id, 'state': inv.state, 'message': 'Invitation already sent'}
+    # Resend retains idempotency keys for 24 hours. Never retry past that window.
+    if utc(inv.created_at) + timedelta(hours=23) <= now():
+        raise HTTPException(409, 'This delivery retry has expired. Send a new invitation using today\'s allowance')
+    return send_app_invitation(db, inv, user)
 
 def start_session(response: Response, db: Session, user: User):
     value = secrets.token_urlsafe(40)
@@ -274,7 +423,9 @@ def create_record(body: RecordCreate, user: User = Depends(auth_user), db: Sessi
     item_name = body.item_name.strip()
     if not name or not item_name:
         raise HTTPException(422, 'Item and person names are required')
-    contact = db.scalar(select(Contact).where(Contact.owner_id == user.id, Contact.name == name))
+    contact_match = (func.lower(Contact.email) == body.contact_email if body.contact_email else
+                     (Contact.name == name) & Contact.email.is_(None))
+    contact = db.scalar(select(Contact).where(Contact.owner_id == user.id, contact_match))
     if not contact:
         contact = Contact(owner_id=user.id, name=name, email=body.contact_email)
         db.add(contact)
@@ -286,13 +437,21 @@ def create_record(body: RecordCreate, user: User = Depends(auth_user), db: Sessi
     db.add(record)
     db.flush()
     event(db, record, 'OWNER', 'CREATED', 'Personal record created' if body.mode == 'OFF' else 'Shared record drafted')
+    delivery = deliver_record(db, record, user, body.contact_email) if body.mode == 'ON' else None
     db.commit()
     db.refresh(record)
-    return summary(record)
+    result = summary(record)
+    if delivery:
+        result['invitation_delivery'] = delivery['delivery']
+    return result
 
 @app.get('/api/records/{record_id}')
 def record_details(record_id: str, user: User = Depends(auth_user), db: Session = Depends(get_db)):
-    return detail(get_owned(db, user, record_id))
+    result = detail(get_owned(db, user, record_id))
+    inv = db.scalar(select(Invitation).where(Invitation.record_id == record_id).order_by(Invitation.created_at.desc()))
+    if inv:
+        result.update(acknowledgment_email=inv.recipient_email, invitation_delivery=inv.delivery)
+    return result
 
 @app.patch('/api/records/{record_id}', dependencies=[Depends(require_csrf)])
 def edit_record(record_id: str, body: RecordEdit, user: User = Depends(auth_user), db: Session = Depends(get_db)):
@@ -314,20 +473,50 @@ def edit_record(record_id: str, body: RecordEdit, user: User = Depends(auth_user
     return summary(rec)
 
 @app.post('/api/records/{record_id}/share', dependencies=[Depends(require_csrf)])
-def create_invitation(record_id: str, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+def create_invitation(record_id: str, body: InviteEmail, user: User = Depends(auth_user), db: Session = Depends(get_db)):
     rec = get_owned(db, user, record_id)
+    db.scalar(select(Record).where(Record.id == rec.id).with_for_update())
     if rec.returns and sum(r.quantity for r in rec.returns if r.status == 'CONFIRMED'):
         raise HTTPException(409, 'Already-returned records cannot be newly shared')
-    for old in db.scalars(select(Invitation).where(Invitation.record_id == rec.id, Invitation.state.in_(['PENDING', 'ACCEPTED']))):
-        old.state = 'REVOKED'
-    raw = secrets.token_urlsafe(36)
-    invitation = Invitation(record_id=rec.id, token_hash=digest(raw), expires_at=now() + timedelta(days=30))
-    db.add(invitation)
-    rec.mode = 'ON'
-    rec.acknowledgment = 'PENDING'
-    event(db, rec, 'OWNER', 'INVITED', 'Loan link created (not yet acknowledged)')
+    delivery = deliver_record(db, rec, user, body.email)
     db.commit()
-    return {'path': f'/share/{raw}', 'expires_at': invitation.expires_at.isoformat(), 'status': 'PENDING'}
+    return delivery
+
+
+@app.get('/api/inbox')
+def acknowledgment_inbox(user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    invitations = db.scalars(select(Invitation).where(Invitation.recipient_user_id == user.id,
+        Invitation.state.in_(['PENDING', 'ACCEPTED']), Invitation.expires_at > now()).order_by(Invitation.created_at.desc())).all()
+    return [recipient_view(db, inv, db.get(Record, inv.record_id)) for inv in invitations]
+
+
+@app.get('/api/inbox/{invitation_id}')
+def inbox_details(invitation_id: str, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    inv, rec = recipient_invitation(db, user, invitation_id)
+    return recipient_view(db, inv, rec)
+
+
+@app.post('/api/inbox/{invitation_id}/respond', dependencies=[Depends(require_csrf)])
+def inbox_respond(invitation_id: str, body: ShareResponse, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    inv, rec = recipient_invitation(db, user, invitation_id)
+    return record_response(db, inv, rec, body.accept, authenticated=True)
+
+
+@app.post('/api/inbox/{invitation_id}/returns', dependencies=[Depends(require_csrf)])
+def inbox_return(invitation_id: str, body: QuantityBody, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    inv, rec = recipient_invitation(db, user, invitation_id)
+    ensure_share_accepted(inv, rec)
+    return add_return(db, rec, body.quantity, 'GUEST')
+
+
+@app.post('/api/inbox/{invitation_id}/returns/{return_id}/confirm', dependencies=[Depends(require_csrf)])
+def inbox_confirm(invitation_id: str, return_id: str, user: User = Depends(auth_user), db: Session = Depends(get_db)):
+    inv, rec = recipient_invitation(db, user, invitation_id)
+    ensure_share_accepted(inv, rec)
+    item_return = db.get(ItemReturn, return_id)
+    if not item_return or item_return.record_id != rec.id:
+        raise HTTPException(404, 'Return not found')
+    return confirm_return(db, rec, item_return, 'GUEST')
 
 @app.post('/api/records/{record_id}/returns', dependencies=[Depends(require_csrf)])
 def owner_return(record_id: str, body: QuantityBody, user: User = Depends(auth_user), db: Session = Depends(get_db)):
@@ -345,33 +534,12 @@ def owner_confirm(record_id: str, return_id: str, user: User = Depends(auth_user
 @app.get('/api/share/{token}')
 def public_invite(token: str, db: Session = Depends(get_db)):
     inv, rec = invited(db, token)
-    owner = db.get(User, rec.owner_id)
-    result = detail(rec)
-    # Only share the minimum information needed to review this particular item loan.
-    result.pop('notes', None)
-    result.pop('events', None)
-    result['owner_name'] = owner.name
-    result['invitation_state'] = inv.state
-    result['link_expires_at'] = inv.expires_at.isoformat()
-    return result
+    return recipient_view(db, inv, rec)
 
 @app.post('/api/share/{token}/respond', dependencies=[Depends(require_csrf)])
 def respond(token: str, body: ShareResponse, db: Session = Depends(get_db)):
     inv, rec = invited(db, token)
-    if inv.state != 'PENDING' or rec.acknowledgment != 'PENDING':
-        raise HTTPException(409, 'Loan link already answered')
-    if body.accept:
-        inv.state = 'ACCEPTED'
-        rec.acknowledgment = 'CONFIRMED'
-        handover = 'Item taken / borrowed' if rec.direction == 'LENT' else 'Item given / lent'
-        event(db, rec, 'GUEST', 'ACKNOWLEDGED', f'{handover} acknowledged through loan link (identity unverified)')
-    else:
-        inv.state = 'DECLINED'
-        rec.acknowledgment = 'DECLINED'
-        event(db, rec, 'GUEST', 'DECLINED', 'Recipient declined to acknowledge this record')
-    inv.responded_at = now()
-    db.commit()
-    return {'acknowledgment': rec.acknowledgment}
+    return record_response(db, inv, rec, body.accept)
 
 @app.post('/api/share/{token}/returns', dependencies=[Depends(require_csrf)])
 def guest_return(token: str, body: QuantityBody, db: Session = Depends(get_db)):

@@ -1,5 +1,7 @@
 """API regressions for permissions, handover acknowledgment and returns."""
 import pytest
+import re
+from backend import main
 
 def post(client, url, payload):
     return client.post(url, json=payload, headers={'X-CSRF-Token':client.cookies.get('udhaar_csrf', '')})
@@ -11,15 +13,20 @@ def account(client, name, email):
 def create_record(client, direction='LENT', mode='OFF', quantity=2):
     response=post(client,'/api/records', {
         'direction':direction,'mode':mode,'contact_name':'Rahul','item_name':'Cordless drill','category':'Tools',
+        'contact_email':'rahul@example.com',
         'quantity':quantity,'loan_date':'2026-10-15','due_date':'2026-10-25','notes':'Private purchase receipt'
     })
     assert response.status_code==201, response.text
     return response.json()
 
 def invite(client, id):
-    response=post(client,f'/api/records/{id}/share', {})
+    # Read the guest link from the delivered email, as a recipient would.
+    from unittest.mock import patch
+    messages = []
+    with patch.object(main.email_delivery, 'send_email', lambda email, subject, message, key: messages.append(message) or 'test-id'):
+        response=post(client,f'/api/records/{id}/share', {'email':'rahul@example.com'})
     assert response.status_code==200, response.text
-    return response.json()['path']
+    return re.search(r'https://udhaar.example.com(/share/\S+)', messages[-1]).group(1)
 
 def accept(client, path):
     response=post(client,f'/api{path}/respond', {'accept':True})
@@ -36,7 +43,7 @@ def test_private_default_and_isolation(setup):
     assert guest.get(f'/api/records/{r["id"]}').status_code==401
     assert stranger.get(f'/api/records/{r["id"]}').status_code==404
     assert stranger.get('/api/records').json()==[]
-    assert stranger.post(f'/api/records/{r["id"]}/share',headers={'X-CSRF-Token':stranger.cookies['udhaar_csrf']}).status_code==404
+    assert post(stranger,f'/api/records/{r["id"]}/share',{'email':'rahul@example.com'}).status_code==404
     returned=post(owner,f'/api/records/{r["id"]}/returns',{'quantity':1})
     assert returned.json()['status']=='CONFIRMED'
     info=owner.get(f'/api/records/{r["id"]}').json()
@@ -71,7 +78,7 @@ def test_share_acknowledgment_and_guest_lent_return(setup):
     assert invite_error(owner, r['id']) == 409
 
 def invite_error(client, record_id):
-    return post(client,f'/api/records/{record_id}/share',{}).status_code
+    return post(client,f'/api/records/{record_id}/share',{'email':'rahul@example.com'}).status_code
 
 def test_borrowed_owner_requests_lender_confirms(setup):
     owner, guest, _=setup

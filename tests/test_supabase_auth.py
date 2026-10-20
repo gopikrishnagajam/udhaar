@@ -374,11 +374,12 @@ def test_auth_config_reports_cookie_presence_without_provider_requests(remote):
     assert len(state['requests']) == baseline
 
 
-def test_anonymous_loan_link_still_supports_both_acknowledgments(remote):
+def test_anonymous_loan_link_still_supports_both_acknowledgments(remote, mail):
     (owner, guest, _), _state = remote
     signin(owner)
-    record = post(owner, '/api/records', {'direction': 'BORROWED', 'mode': 'ON', 'contact_name': 'Rahul', 'item_name': 'Book', 'quantity': 1, 'loan_date': '2026-10-16'}).json()
-    path = post(owner, f"/api/records/{record['id']}/share").json()['path']
+    record = post(owner, '/api/records', {'direction': 'BORROWED', 'mode': 'ON', 'contact_name': 'Rahul', 'contact_email': 'rahul@example.com', 'item_name': 'Book', 'quantity': 1, 'loan_date': '2026-10-16'}).json()
+    import re
+    path = re.search(r'https://udhaar.example.com(/share/\S+)', mail[-1]['message']).group(1)
     assert guest.get('/api/me').status_code == 401
     assert post(guest, '/api' + path + '/respond', {'accept': True}).status_code == 200
     proposed = post(owner, f"/api/records/{record['id']}/returns", {'quantity': 1}).json()

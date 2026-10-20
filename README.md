@@ -14,7 +14,7 @@ This is a **working local MVP**, not a deployment-ready commercial product. It t
 
 - Supabase email-code signup/sign-in in Docker, with local profiles and HTTP-only auth cookies; explicit local development mode retains email/password authentication.
 - **Off the Record**: default private lending and borrowing records; users can update notes, due dates, and item names and mark items returned without inviting anyone.
-- **On the Record**: optional invitations via private links; the other person can acknowledge or decline without a separate account. Sent ≠ accepted.
+- **On the Record**: requests go to an existing user's acknowledgment inbox or to a guest by email. Guests can acknowledge or decline without an account. Sent ≠ accepted.
 - **Return tracking**: partial returns; either party can propose. Only the **lender** may confirm a shared return. Privately recorded returns are marked complete by the owner.
 - **Independent states**: `acknowledgment` (`NONE`, `PENDING`, `CONFIRMED`, `DECLINED`) is separate from settlement (`OUTSTANDING`, `PARTIAL`, `RETURNED`).
 - Searchable dashboard, lent/borrowed counts, overdue indicators, record activity history, mobile-responsive UI.
@@ -158,7 +158,10 @@ When money tracking is introduced later, add a distinct `MoneyLoan` extension (`
 
 - `POST /api/register`, `/api/login`, `/api/logout`, `GET /api/me`
 - `GET /api/records`, `POST /api/records`, `GET /api/records/{id}`, `PATCH /api/records/{id}`
-- `POST /api/records/{id}/share`
+- `POST /api/records/{id}/share` with `{ "email": "recipient@example.com" }`
+- `GET /api/app-invites`, `POST /api/app-invites`, `POST /api/app-invites/{id}/retry`
+- `GET /api/inbox`, `GET /api/inbox/{id}`, `POST /api/inbox/{id}/respond`
+- `POST /api/inbox/{id}/returns`, `POST /api/inbox/{id}/returns/{return_id}/confirm`
 - `POST /api/records/{id}/returns`, `POST /api/records/{id}/returns/{return_id}/confirm`
 - `GET /api/share/{token}`, `POST /api/share/{token}/respond`
 - `POST /api/share/{token}/returns`, `POST /api/share/{token}/returns/{return_id}/confirm`
@@ -224,8 +227,9 @@ Built as an implementation of our October 2026 Udhaar product conversation.
 ## Simple sharing
 
 - **Loan links** (`/share/<token>`): anyone holding the link can view and acknowledge the loan without an account, then revisit the same link for returns. The sender is responsible for sharing with the right person; identity is not verified. Borrowers report returns and lenders confirm receipt. Private notes remain hidden. Links expire after 30 days; replacing one invalidates the previous link and requires fresh acknowledgment.
-- **App invitations** (`/signup`): use **Invite friends** in the dashboard to copy the signup URL and send it through a messaging app. There is no invitation tracking or automatic delivery.
-- Open the app at an address recipients can reach before copying links. Localhost links only work on the sender's computer; LAN IP links require access to that network.
+- **App invitations** (`/signup`): use **Invite friends**, enter an email, and send a regular invitation through Resend. Each account gets two invitations per UTC calendar day. The database preserves this allowance across restarts and concurrent requests. An uncertain or failed delivery keeps its slot and can be retried with the same Resend idempotency key for up to 23 hours without using another slot.
+- **On the Record loans** require the other person's email when created or converted. A registered app profile receives a request in **Acknowledgments**, refreshed every 30 seconds while the tab is visible, and can acknowledge and handle returns there. Otherwise, Resend emails a guest loan link with an optional signup link. These acknowledgment emails have no application daily cap and never use regular app-invite slots; Resend's account sending limits still apply. Signing up later does not automatically claim an older anonymous loan link.
+- Configure `RESEND_API_KEY`, `UDHAAR_EMAIL_FROM` (a verified sender), and `UDHAAR_PUBLIC_URL` (a reachable HTTPS origin) in `.env`. Supabase's SMTP integration only sends authentication emails; application invitations call the Resend API directly. No Supabase admin/service-role key is needed. See [email invitation setup](docs/email-invitations.md).
 
 ### Two separate acknowledgments
 

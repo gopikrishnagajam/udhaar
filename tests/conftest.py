@@ -10,7 +10,20 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from backend.main import app, get_db
 from backend.models import Base
 from backend import main
+from backend import email_delivery
 from backend.migrate import upgrade_database, ensure_database_current
+
+
+@pytest.fixture(autouse=True)
+def mail(monkeypatch):
+    """No regression test may send a real transactional email."""
+    monkeypatch.setenv('UDHAAR_PUBLIC_URL', 'https://udhaar.example.com')
+    messages = []
+    def send(email, subject, message, key):
+        messages.append({'email': email, 'subject': subject, 'message': message, 'key': key})
+        return 'test-message-id'
+    monkeypatch.setattr(email_delivery, 'send_email', send)
+    return messages
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
