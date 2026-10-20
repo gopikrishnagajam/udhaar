@@ -5,6 +5,8 @@
 For a guided explanation of the working system, read
 [Understanding the setup](docs/understanding-the-setup.md): authentication, token
 storage, database tables, loan acknowledgments, Docker, pgAdmin, and Mailtrap.
+For hosted PostgreSQL, migrations, and staging commands, read the
+[Supabase database guide](docs/supabase-database.md).
 
 This is a **working local MVP**, not a deployment-ready commercial product. It tracks **physical items** first while keeping a shared `Record` / item-specific `ItemLoan` model suitable for a future `MoneyLoan`. The current package has **no AI features, payment features, product recommendations, data resale, or analytics tracking**.
 
@@ -12,7 +14,7 @@ This is a **working local MVP**, not a deployment-ready commercial product. It t
 
 - Supabase email-code signup/sign-in in Docker, with local profiles and HTTP-only auth cookies; explicit local development mode retains email/password authentication.
 - **Off the Record**: default private lending and borrowing records; users can update notes, due dates, and item names and mark items returned without inviting anyone.
-- **On the Record**: optional invitations via private links; the other person can acknowledge or decline without a separate account. Sent ≠ accepted.
+- **On the Record**: requests go to an existing user's acknowledgment inbox or to a guest by email. Guests can acknowledge or decline without an account. Sent ≠ accepted.
 - **Return tracking**: partial returns; either party can propose. Only the **lender** may confirm a shared return. Privately recorded returns are marked complete by the owner.
 - **Independent states**: `acknowledgment` (`NONE`, `PENDING`, `CONFIRMED`, `DECLINED`) is separate from settlement (`OUTSTANDING`, `PARTIAL`, `RETURNED`).
 - Searchable dashboard, lent/borrowed counts, overdue indicators, record activity history, mobile-responsive UI.
@@ -31,8 +33,8 @@ docker compose ps
 ```
 
 Open **http://localhost:8000**. Compose builds the Python app with the PostgreSQL
-driver, waits for PostgreSQL to be healthy, and creates the application tables on
-the first startup. `/api/health` checks the application's database connection.
+driver, waits for PostgreSQL to be healthy, and runs the migration service before
+starting the app. `/api/health` checks the application's database connection.
 Both ports are bound to localhost: app `8000`, PostgreSQL `5432`. Change `APP_PORT`
 or `POSTGRES_PORT` in `.env` if needed. Inside Compose, the database host is `db`.
 
@@ -94,8 +96,11 @@ docker compose down
 
 Avoid `docker compose down -v` unless you intend to delete the local database.
 `POSTGRES_PASSWORD` initializes a new volume; changing it later in `.env` does not
-change an existing database password. Application schema changes still need
-migrations before production; `create_all` only creates missing tables.
+change an existing database password. Schema changes now use Alembic migrations.
+For an older unversioned database, back it up and run
+`docker compose run --build --rm migrate python -m backend.migrate baseline`
+once before starting the updated stack. See the database guide for validation
+and hosted staging; the two Compose stacks keep separate application data.
 
 ## Quick start without Docker (SQLite)
 
@@ -107,10 +112,11 @@ python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python -m backend.migrate upgrade
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Then open **http://127.0.0.1:8000** and create an account. You can add your first item right away; no frontend build, Node.js, or external API key is needed. The app creates `udhaar.sqlite3` automatically and keeps the records across restarts. API documentation is at `http://127.0.0.1:8000/api/docs`.
+Then open **http://127.0.0.1:8000** and create an account. You can add your first item right away; no frontend build, Node.js, or external API key is needed. The migration command initializes `udhaar.sqlite3`, which keeps records across restarts. Existing unversioned databases need a backup and `python -m backend.migrate baseline` before upgrading. API documentation is at `http://127.0.0.1:8000/api/docs`.
 
 ### Try the hybrid workflow
 
@@ -127,11 +133,11 @@ Then open **http://127.0.0.1:8000** and create an account. You can add your firs
 | Layer | Implementation |
 |---|---|
 | Backend | FastAPI (Python), JSON REST endpoints |
-| Database | SQLAlchemy models, SQLite for local development |
+| Database | SQLAlchemy + Alembic; Docker PostgreSQL locally, Supabase PostgreSQL for hosted staging, optional local SQLite |
 | Frontend | Responsive HTML + vanilla JavaScript + CSS; no build step |
 | Authentication | Supabase email OTP with server validation, HTTP-only token cookies, local identity mapping, CSRF checks; optional legacy local password mode |
 | Sharing | Opaque random bearer invitation token; only its SHA-256 hash is stored |
-| Optional later database | PostgreSQL via `UDHAAR_DATABASE_URL` with `requirements-postgres.txt` |
+| Hosted database | Supabase Session pooler via `compose.supabase.yaml`; private `udhaar` schema |
 
 **Why not Django/React yet?** The agreed early design suggested Django REST Framework + React/TypeScript. For this runnable artifact we used a lightweight server and no-build frontend, since this execution environment cannot fetch those dependencies. This is a pragmatic MVP implementation, not a change to the product architecture commitment. A Django/React production rebuild can preserve the same models, lifecycle and REST API semantics.
 
@@ -152,7 +158,10 @@ When money tracking is introduced later, add a distinct `MoneyLoan` extension (`
 
 - `POST /api/register`, `/api/login`, `/api/logout`, `GET /api/me`
 - `GET /api/records`, `POST /api/records`, `GET /api/records/{id}`, `PATCH /api/records/{id}`
-- `POST /api/records/{id}/share`
+- `POST /api/records/{id}/share` with `{ "email": "recipient@example.com" }`
+- `GET /api/app-invites`, `POST /api/app-invites`, `POST /api/app-invites/{id}/retry`
+- `GET /api/inbox`, `GET /api/inbox/{id}`, `POST /api/inbox/{id}/respond`
+- `POST /api/inbox/{id}/returns`, `POST /api/inbox/{id}/returns/{return_id}/confirm`
 - `POST /api/records/{id}/returns`, `POST /api/records/{id}/returns/{return_id}/confirm`
 - `GET /api/share/{token}`, `POST /api/share/{token}/respond`
 - `POST /api/share/{token}/returns`, `POST /api/share/{token}/returns/{return_id}/confirm`
@@ -168,12 +177,25 @@ python -m pytest -q tests
 
 Tests cover privacy/isolation, acknowledgment, duplicate response rejection, lender-only confirmation, partial returns, outstanding-quantity safeguards, link revocation, declined invitations, invalid dates and CSRF protection.
 
+Session browser regressions (Node.js 20+, installed Microsoft Edge, and the Docker
+app running) are available separately:
+
+```powershell
+npm ci --prefix tests/browser
+npm test --prefix tests/browser
+```
+
+These checks exercise the real frontend with simulated session responses and an
+anonymous live-server check. They send no email. See the
+[authentication testing guide](docs/supabase-implementation.md#testing-and-acceptance)
+for coverage, browser configuration, and remaining live-provider checks.
+
 ## Important limits before any public launch
 
 This is a small-group development prototype. Before deployment to untrusted users, add:
 
 - HTTPS, secure cookies (`UDHAAR_COOKIE_SECURE=true`) and correctly configured host/origin restrictions.
-- Proper persistent Postgres migrations (Alembic), database backups, transaction isolation/locking for concurrent returns, and safe operational monitoring.
+- Database backups and restore testing, migration release reviews, transaction isolation/locking for concurrent returns, and safe operational monitoring.
 - Email verification for higher-trust acknowledgment; abuse protection, login rate limiting, account recovery and invitation revocation UI.
 - Thorough accessibility, end-to-end/browser, security, and load testing; privacy policy, data export/deletion flows and retention rules.
 - Invitation-link handling safeguards (they grant bearer access to the specific loan). Sharing identity has not been verified.
@@ -205,8 +227,9 @@ Built as an implementation of our October 2026 Udhaar product conversation.
 ## Simple sharing
 
 - **Loan links** (`/share/<token>`): anyone holding the link can view and acknowledge the loan without an account, then revisit the same link for returns. The sender is responsible for sharing with the right person; identity is not verified. Borrowers report returns and lenders confirm receipt. Private notes remain hidden. Links expire after 30 days; replacing one invalidates the previous link and requires fresh acknowledgment.
-- **App invitations** (`/signup`): use **Invite friends** in the dashboard to copy the signup URL and send it through a messaging app. There is no invitation tracking or automatic delivery.
-- Open the app at an address recipients can reach before copying links. Localhost links only work on the sender's computer; LAN IP links require access to that network.
+- **App invitations** (`/signup`): use **Invite friends**, enter an email, and send a regular invitation through Resend. Each account gets two invitations per UTC calendar day. The database preserves this allowance across restarts and concurrent requests. An uncertain or failed delivery keeps its slot and can be retried with the same Resend idempotency key for up to 23 hours without using another slot.
+- **On the Record loans** require the other person's email when created or converted. A registered app profile receives a request in **Acknowledgments**, refreshed every 30 seconds while the tab is visible, and can acknowledge and handle returns there. Otherwise, Resend emails a guest loan link with an optional signup link. These acknowledgment emails have no application daily cap and never use regular app-invite slots; Resend's account sending limits still apply. Signing up later does not automatically claim an older anonymous loan link.
+- Configure `RESEND_API_KEY`, `UDHAAR_EMAIL_FROM` (a verified sender), and `UDHAAR_PUBLIC_URL` (a reachable HTTPS origin) in `.env`. Supabase's SMTP integration only sends authentication emails; application invitations call the Resend API directly. No Supabase admin/service-role key is needed. See [email invitation setup](docs/email-invitations.md).
 
 ### Two separate acknowledgments
 

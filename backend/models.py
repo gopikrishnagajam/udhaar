@@ -1,15 +1,10 @@
 """Udhaar schema. Common records can support future MoneyLoan rows."""
-import os
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from sqlalchemy import create_engine, String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+from datetime import date, datetime, timezone
+from sqlalchemy import String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-ROOT = Path(__file__).resolve().parent.parent
-DATABASE_URL = os.getenv('UDHAAR_DATABASE_URL', f'sqlite:///{ROOT / "udhaar.sqlite3"}')
-engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False} if DATABASE_URL.startswith('sqlite') else {}, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+from .database import DATABASE_URL, engine, SessionLocal
 
 def uid():
     return str(uuid.uuid4())
@@ -88,6 +83,25 @@ class Invitation(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recipient_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    recipient_user_id: Mapped[str | None] = mapped_column(ForeignKey('users.id'), index=True, nullable=True)
+    delivery: Mapped[str] = mapped_column(String(16), default='LINK', nullable=False)
+
+class AppInvitation(Base):
+    """Two durable delivery slots per sender per UTC calendar day."""
+    __tablename__ = 'app_invitations'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    sender_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    invite_day: Mapped[date] = mapped_column(Date, nullable=False)
+    slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), default='RESERVED', nullable=False)
+    message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
+    __table_args__ = (
+        UniqueConstraint('sender_id', 'invite_day', 'slot', name='app_invite_daily_slot'),
+        CheckConstraint('slot IN (1, 2)', name='app_invite_slot_limit'),
+    )
 
 class ItemReturn(Base):
     __tablename__ = 'item_returns'

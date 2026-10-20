@@ -310,14 +310,24 @@ def make_router(get_db, csrf_dependency):
     @router.post('/logout', dependencies=[Depends(csrf_dependency), Depends(require_supabase)])
     def logout(request: Request, response: Response):
         token = request.cookies.get(ACCESS_COOKIE)
+        refresh_token = request.cookies.get(REFRESH_COOKIE)
         revoked = False
         try:
-            if not token and request.cookies.get(REFRESH_COOKIE):
-                refreshed = auth_request('POST', '/token?grant_type=refresh_token', {'refresh_token': request.cookies[REFRESH_COOKIE]})
-                token = refreshed.get('access_token')
             if token:
-                auth_request('POST', '/logout?scope=local', token=token)
-                revoked = True
+                try:
+                    auth_request('POST', '/logout?scope=local', token=token)
+                    revoked = True
+                except HTTPException as error:
+                    # A stale access cookie must not prevent revocation through
+                    # a still-valid refresh token. Do not retry provider outages.
+                    if error.status_code != 401:
+                        raise
+            if not revoked and refresh_token:
+                refreshed = auth_request('POST', '/token?grant_type=refresh_token', {'refresh_token': refresh_token})
+                token = refreshed.get('access_token')
+                if isinstance(token, str) and token:
+                    auth_request('POST', '/logout?scope=local', token=token)
+                    revoked = True
         except HTTPException:
             pass  # Always allow browser sign-out, including during an outage.
         clear_session(response)
