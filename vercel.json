@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "buildCommand": "python -m backend.migrate check",
+  "functions": {
+    "app.py": {
+      "maxDuration": 60,
+      "includeFiles": "{static/**,migrations/**,alembic.ini,PRIVACY.md,TERMS.md,RIGHTS.md,LICENSE,NOTICE}"
+    }
+  }
+}

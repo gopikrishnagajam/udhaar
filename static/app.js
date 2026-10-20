@@ -130,7 +130,7 @@ function authScreen(message='', recovery=null) {
  <label>Password<input name="password" type="password" required minlength="8" placeholder="At least 8 characters" autocomplete="${signup?'new-password':'current-password'}" /></label>
  <button class="btn btn-primary full" type="submit">${signup?'Create my account':'Sign in'} ${icon('arrow',18)}</button><p class="form-error" id="auth-error" role="alert"></p></form>
  <div class="auth-switch">${signup?'Already have an account?':'New to Udhaar?'} <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>
- <div class="auth-note">Your personal records are never visible to other Udhaar users unless you explicitly share them.</div></div></section></div>`;
+ <div class="auth-note">Your personal records stay private from other users unless you share them. Read our <a href="/privacy">Privacy notice</a> and <a href="/terms">Terms</a>.</div></div></section></div>`;
  $('#switch-auth').onclick=()=>{signup=!signup;authScreen()};
  $('#auth-form').onsubmit=async e=>{e.preventDefault();const btn=$('#auth-form button[type=submit]');btn.disabled=true;const d=Object.fromEntries(new FormData(e.target));try {user=await send(signup?'/api/register':'/api/login',d);await loadRecords();}catch(err){$('#auth-error').textContent=err.message}finally{btn.disabled=false}};
 }
@@ -146,7 +146,7 @@ function supabaseAuthScreen(message='', recovery=null) {
  <button class="btn btn-primary full" type="submit" ${!authConfig.configured?'disabled':''}>${otpSent?'Verify and continue':'Send sign-in code'} ${icon('arrow',18)}</button><p class="form-error" id="otp-error" role="alert">${esc(message)}</p></form>
  ${recovery?'<button id="retry-session" class="btn btn-secondary full">Retry session</button>':''}
  <div class="auth-switch">${otpSent?'<button id="change-email">Change email</button> <button id="resend-code" disabled>Resend code</button> ':''}<span>${signup?'Already have an account?':'New to Udhaar?'}</span> <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>
- <div class="auth-note">Your personal records stay private unless you share a loan link.</div></div></section></div>`;
+ <div class="auth-note">Your personal records stay private from other users unless you share them. Read our <a href="/privacy">Privacy notice</a> and <a href="/terms">Terms</a>.</div></div></section></div>`;
  $('#switch-auth')?.addEventListener('click',()=>{if(authSubmitting)return;signup=!signup;otpSent=false;authScreen()});
  $('#change-email')?.addEventListener('click',()=>{if(authSubmitting)return;otpSent=false;authScreen()});
  const retry=$('#retry-session');

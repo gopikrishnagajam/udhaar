@@ -1,5 +1,9 @@
 # Email invitations and loan acknowledgments
 
+The public app is https://udhaar-mvp.vercel.app. Its invitations use `/signup`
+and guest requests use `/share/<token>` on that origin. Local Docker uses its own
+`.env` origin; old emails keep the URL they were originally sent with.
+
 ## Configure delivery
 
 Supabase continues to send sign-in codes using your configured Resend SMTP account.
@@ -16,10 +20,12 @@ user, which is unnecessary for these invitations.
    ```dotenv
    RESEND_API_KEY=re_your_key
    UDHAAR_EMAIL_FROM=Udhaar <invites@your-verified-domain.com>
-   UDHAAR_PUBLIC_URL=https://your-app.example.com
+   UDHAAR_PUBLIC_URL=http://localhost:8001
    ```
 
-   Use the app's origin without a path. Both `/signup` and `/share/...` must be
+   The example above is for local Docker. Set Vercel's Production
+   `UDHAAR_PUBLIC_URL=https://udhaar-mvp.vercel.app` separately. Use the app's
+   origin without a path. Both `/signup` and `/share/...` must be
    reachable there. `http://localhost:8001` is accepted for same-computer tests;
    it will not work for recipients on other computers.
 
