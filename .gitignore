@@ -9,3 +9,6 @@ node_modules/
 backups/
 secrets.txt
 .vscode
+.vercel/
+.env*
+!.env.example

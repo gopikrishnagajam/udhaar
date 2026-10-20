@@ -25,7 +25,7 @@ def create_original_schema(engine):
 @pytest.fixture
 def database_config(monkeypatch):
     for key in ('UDHAAR_DATABASE_URL', 'UDHAAR_DATABASE_SCHEMA', 'UDHAAR_ENV',
-                'UDHAAR_COOKIE_SECURE', 'UDHAAR_AUTH_PROVIDER'):
+                'UDHAAR_COOKIE_SECURE', 'UDHAAR_AUTH_PROVIDER', 'VERCEL'):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
 
@@ -68,6 +68,34 @@ def test_production_accepts_explicit_secure_configuration(database_config):
                        'UDHAAR_COOKIE_SECURE': 'true', 'UDHAAR_AUTH_PROVIDER': 'supabase'}.items():
         database_config.setenv(key, value)
     assert database_settings()[1] == 'udhaar'
+
+
+def test_vercel_uses_transaction_pooler_without_client_pool_or_prepared_statements(database_config):
+    from sqlalchemy.pool import NullPool
+    database_config.setenv('VERCEL', '1')
+    database_config.setenv('UDHAAR_DATABASE_URL', 'postgresql://postgres.project:secret@aws-0-test.pooler.supabase.com:6543/postgres?sslmode=require')
+    database_config.setenv('UDHAAR_ENV', 'production')
+    database_config.setenv('UDHAAR_DATABASE_SCHEMA', 'udhaar')
+    database_config.setenv('UDHAAR_COOKIE_SECURE', 'true')
+    database_config.setenv('UDHAAR_AUTH_PROVIDER', 'supabase')
+    url, schema = database_settings()
+    engine = database_engine(url, schema)
+    try:
+        assert url.port == 6543
+        assert isinstance(engine.pool, NullPool)
+        # Check actual driver connect arguments without opening a network socket.
+        from sqlalchemy import event
+        class StopBeforeConnection(Exception):
+            pass
+        @event.listens_for(engine, 'do_connect')
+        def inspect_connection(dialect, record, args, kwargs):
+            assert kwargs['prepare_threshold'] is None
+            assert kwargs['sslmode'] == 'require'
+            raise StopBeforeConnection()
+        with pytest.raises(StopBeforeConnection):
+            engine.connect()
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture

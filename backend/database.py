@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -38,7 +39,7 @@ def database_settings():
         raise ValueError('Hosted environments require PostgreSQL and a private application schema')
     if (hosted or supabase) and url.query.get('sslmode') not in {'require', 'verify-ca', 'verify-full'}:
         raise ValueError('Hosted PostgreSQL requires sslmode=require or certificate verification')
-    if supabase and url.port == 6543:
+    if supabase and url.port == 6543 and os.getenv('VERCEL') != '1':
         raise ValueError('Use the Supabase Session pooler on port 5432 for this deployment')
     if environment == 'production':
         if os.getenv('UDHAAR_COOKIE_SECURE') != 'true' or os.getenv('UDHAAR_AUTH_PROVIDER') != 'supabase':
@@ -49,8 +50,15 @@ def database_settings():
 def database_engine(url, schema=None):
     if url.drivername == 'sqlite':
         return create_engine(url, connect_args={'check_same_thread': False}, pool_pre_ping=True)
-    result = create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=2,
-                           pool_timeout=10, connect_args={'connect_timeout': 10})
+    if os.getenv('VERCEL') == '1':
+        # Supavisor owns pooling across function instances. Disable psycopg's
+        # prepared statements for the transaction pooler and release each request's
+        # connection rather than retaining five connections per warm instance.
+        result = create_engine(url, poolclass=NullPool,
+            connect_args={'connect_timeout': 10, 'prepare_threshold': None})
+    else:
+        result = create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=2,
+                               pool_timeout=10, connect_args={'connect_timeout': 10})
     # Qualify every ORM table reference. Do not depend on a pooled search_path.
     return result.execution_options(schema_translate_map={None: schema or 'public'})
 

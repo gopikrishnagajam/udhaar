@@ -1,0 +1,19 @@
+# Upload only runtime sources. Never upload local settings or databases.
+*
+!app.py
+!vercel.json
+!.python-version
+!requirements.txt
+!backend
+!backend/**
+!static
+!static/**
+!migrations
+!migrations/**
+!alembic.ini
+**/__pycache__
+**/__pycache__/**
+**/*.pyc
+**/.env*
+**/*.sqlite3*
+**/*.db

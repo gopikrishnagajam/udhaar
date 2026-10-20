@@ -7,6 +7,8 @@ For a guided explanation of the working system, read
 storage, database tables, loan acknowledgments, Docker, pgAdmin, and Mailtrap.
 For hosted PostgreSQL, migrations, and staging commands, read the
 [Supabase database guide](docs/supabase-database.md).
+For public testing with Vercel's native Python runtime, read the
+[Vercel deployment guide](docs/vercel-deployment.md).
 
 This is a **working local MVP**, not a deployment-ready commercial product. It tracks **physical items** first while keeping a shared `Record` / item-specific `ItemLoan` model suitable for a future `MoneyLoan`. The current package has **no AI features, payment features, product recommendations, data resale, or analytics tracking**.
 
