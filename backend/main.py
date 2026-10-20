@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, AppInvitation, now
-from . import supabase_auth, email_delivery
+from . import supabase_auth, email_delivery, policies
 from .migrate import ensure_database_current
 
 @asynccontextmanager
@@ -29,6 +29,7 @@ async def lifespan(app):
 app = FastAPI(title='Udhaar MVP', docs_url='/api/docs', openapi_url='/api/openapi.json', lifespan=lifespan)
 ROOT = Path(__file__).resolve().parent.parent
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
+app.include_router(policies.router)
 ph = PasswordHasher()
 
 class Credentials(BaseModel):

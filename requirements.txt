@@ -8,3 +8,4 @@ httpx>=0.27,<1
 PyJWT[crypto]>=2.10,<3
 email-validator>=2.2,<3
 psycopg[binary]>=3.2,<4
+markdown-it-py>=3,<5

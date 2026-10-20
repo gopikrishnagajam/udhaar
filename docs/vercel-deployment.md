@@ -1,5 +1,7 @@
 # Vercel public testing deployment
 
+Current public deployment: https://udhaar-mvp.vercel.app, project `udhaar-mvp`.
+
 The project deploys as a native FastAPI Python function. Supabase continues to
 provide PostgreSQL and Auth, and Resend sends invitations and acknowledgment
 emails. Docker remains the local development setup.
@@ -14,7 +16,8 @@ make a commercial project eligible.
 - `.python-version` selects Python 3.13, matching the Docker runtime.
 - `requirements.txt` includes the PostgreSQL driver Vercel needs.
 - `vercel.json` selects FastAPI, keeps the static files and migration metadata in
-  the function bundle, and sets a 60-second request limit.
+  the function bundle, includes the repository privacy/terms/license documents,
+  and sets a 60-second request limit.
 - `.vercelignore` allows only runtime source files to be uploaded. Local `.env`,
   databases, backups, test files, and other workspace files stay off Vercel.
 - The Vercel build checks the database revision and model compatibility. It never
@@ -103,7 +106,7 @@ does not require publishing or pushing the repository.
 
 ## 4. Verify public access
 
-1. Open the project domain and `/api/health` in a fresh browser.
+1. Open the project domain, `/api/health`, `/privacy`, `/terms`, and `/rights` in a fresh browser.
 2. Sign in using an email code, reload, and confirm the session is retained.
 3. Send an app invitation and open it on another device.
 4. Send one acknowledgment to an existing user and one to a guest. Verify inbox

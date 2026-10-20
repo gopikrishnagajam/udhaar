@@ -11,6 +11,11 @@
 !migrations
 !migrations/**
 !alembic.ini
+!PRIVACY.md
+!TERMS.md
+!RIGHTS.md
+!LICENSE
+!NOTICE
 **/__pycache__
 **/__pycache__/**
 **/*.pyc

@@ -1,241 +1,151 @@
-# Udhaar — runnable MVP
+# Udhaar
 
-**Udhaar** is a responsive lending-and-borrowing tracker: "Lend it. Track it. Get it back."
+Keep track of the physical items you lend and borrow, privately or with the other
+person's acknowledgment.
 
-For a guided explanation of the working system, read
-[Understanding the setup](docs/understanding-the-setup.md): authentication, token
-storage, database tables, loan acknowledgments, Docker, pgAdmin, and Mailtrap.
-For hosted PostgreSQL, migrations, and staging commands, read the
-[Supabase database guide](docs/supabase-database.md).
-For public testing with Vercel's native Python runtime, read the
-[Vercel deployment guide](docs/vercel-deployment.md).
+**Public test app:** https://udhaar-mvp.vercel.app
 
-This is a **working local MVP**, not a deployment-ready commercial product. It tracks **physical items** first while keeping a shared `Record` / item-specific `ItemLoan` model suitable for a future `MoneyLoan`. The current package has **no AI features, payment features, product recommendations, data resale, or analytics tracking**.
+**Author:** [Gopi krishna Gajam](https://github.com/gopikrishnagajam)
 
-## What is included
+**License:** [MIT](LICENSE)
 
-- Supabase email-code signup/sign-in in Docker, with local profiles and HTTP-only auth cookies; explicit local development mode retains email/password authentication.
-- **Off the Record**: default private lending and borrowing records; users can update notes, due dates, and item names and mark items returned without inviting anyone.
-- **On the Record**: requests go to an existing user's acknowledgment inbox or to a guest by email. Guests can acknowledge or decline without an account. Sent ≠ accepted.
-- **Return tracking**: partial returns; either party can propose. Only the **lender** may confirm a shared return. Privately recorded returns are marked complete by the owner.
-- **Independent states**: `acknowledgment` (`NONE`, `PENDING`, `CONFIRMED`, `DECLINED`) is separate from settlement (`OUTSTANDING`, `PARTIAL`, `RETURNED`).
-- Searchable dashboard, lent/borrowed counts, overdue indicators, record activity history, mobile-responsive UI.
-- Invitation links expire after 30 days. Generating a replacement revokes prior links and requires fresh acknowledgment.
-- Per-account authorization and CSRF checks; API tests cover both local and Supabase authentication.
+## How it works
 
-## Local Docker + PostgreSQL (recommended)
+- **Off the Record:** private entries, editable details, and owner-recorded returns.
+- **On the Record:** enter the other person's email. Existing app users receive
+  an acknowledgment inbox request; others receive a private email link and can
+  respond without registering. Private notes are omitted from recipient views.
+- **Two acknowledgments:** accepting the handover is separate from confirming
+  returned items. The lender confirms shared returns; partial returns are supported.
+- **Invite friends:** two regular email invitations per account per UTC day.
+  Loan acknowledgment emails are separate from that allowance.
+- Shared requests expire after 30 days. Replacing one invalidates its predecessor
+  and requires a new handover acknowledgment. Guest links grant access to their
+  holder and do not independently verify identity.
 
-Start Docker Desktop using Linux containers. On first setup, copy `.env.example`
-to `.env` and replace `POSTGRES_PASSWORD` and `PGADMIN_PASSWORD` with separate random URL-safe passwords. If
-`.env` already exists, keep it and add any missing Compose variables.
+## Deployment map
 
-```powershell
-docker compose up --build -d --wait
-docker compose ps
-```
+| App | Runs on | App database | Email links |
+| --- | --- | --- | --- |
+| Public test | Vercel, HTTPS | Supabase `udhaar` schema | `https://udhaar-mvp.vercel.app` |
+| Hosted-data development | Docker, `localhost:8001` | Same Supabase project/schema when using the current `.env` | Local `.env` origin |
+| Isolated local development | Docker, `localhost:8000` | Docker PostgreSQL `public` schema | Local `.env` origin |
+| Optional development | Python, `localhost:8000` | SQLite | Explicitly configured origin |
 
-Open **http://localhost:8000**. Compose builds the Python app with the PostgreSQL
-driver, waits for PostgreSQL to be healthy, and runs the migration service before
-starting the app. `/api/health` checks the application's database connection.
-Both ports are bound to localhost: app `8000`, PostgreSQL `5432`. Change `APP_PORT`
-or `POSTGRES_PORT` in `.env` if needed. Inside Compose, the database host is `db`.
+The public app works with Docker and your computer turned off. The hosted-data
+Docker app and Vercel currently share application data and Auth; a local write
+there affects the public test data. Use the local PostgreSQL stack for isolated
+development. Cookies are shared across ports on the same hostname, so use separate
+browser profiles when testing multiple local deployments.
 
-### Inspect PostgreSQL with pgAdmin
+## Start the hosted-data Docker app
 
-Compose also starts **pgAdmin at http://localhost:5050**, bound to localhost.
-Sign in with `PGADMIN_EMAIL` (default `admin@example.com`) and `PGADMIN_PASSWORD`
-from your local `.env`. Change `PGADMIN_PORT` if port 5050 is in use.
-
-The **Docker > Udhaar local PostgreSQL** server is already registered. Open it
-and enter `POSTGRES_PASSWORD` from `.env` when prompted for the database password.
-This is separate from your pgAdmin login password. Select **Databases > udhaar**:
-
-- **Schemas > public > Tables** contains the application tables. Right-click a
-  table and select **View/Edit Data > All Rows** to inspect its records.
-- **Dashboard** shows database activity and connections.
-- **Tools > Query Tool** lets you run SQL, for example `SELECT * FROM records;`.
-
-pgAdmin settings persist in the separate `pgadmin_data` volume. Its login settings
-initialize on first launch; changing `.env` later does not reset an existing login.
-Database host `db` works inside the Docker network; desktop database clients use
-`localhost` with `POSTGRES_PORT` instead.
-
-### Data and tests
-
-Data lives in the `postgres_data` named volume and survives container restart,
-recreation, and `docker compose down`. This starts a separate database: existing
-`udhaar.sqlite3` data is not imported. Docker defaults to Supabase email-code
-authentication. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in `.env`, configure
-the Supabase email-code template, then recreate the app. See the full
-[Supabase implementation guide](docs/supabase-implementation.md) for architecture,
-flow diagrams, setup, code changes, and manual test steps. Supabase stores
-authentication identities; profiles and loan data remain in local PostgreSQL.
-Set `UDHAAR_AUTH_PROVIDER=local` explicitly to use the earlier password-based
-development mode. There is no automatic fallback between modes.
-
-Run the API suite against PostgreSQL (each test uses a temporary isolated schema):
+Use Python 3.13 for direct development, or Docker Desktop with Linux containers.
+Copy `.env.example` to `.env` only on first setup; preserve an existing `.env`.
+Configure Supabase Auth/database and Resend as described in the linked guides.
 
 ```powershell
-docker compose --profile test run --build --rm tests
+docker compose -f compose.supabase.yaml up --build -d
+docker compose -f compose.supabase.yaml ps
+docker compose -f compose.supabase.yaml logs --tail 50 app migrate
 ```
 
-Run a real HTTP smoke test against the running app:
+Open http://localhost:8001. The one-shot migration service must exit successfully
+before the app starts. `GET /api/health` checks database connectivity.
+
+For a separate local PostgreSQL database and pgAdmin:
 
 ```powershell
-python scripts/smoke_test.py http://localhost:8000
+docker compose -f compose.yaml up --build -d
 ```
 
-The password smoke test requires local authentication mode. It creates a test account
-and a completed loan, retained for inspection.
-It covers registration, login/logout, anonymous handover acknowledgment, return
-acknowledgment, and private-note isolation.
+This app uses port 8000 and pgAdmin uses port 5050. Set `POSTGRES_PASSWORD` and
+`PGADMIN_PASSWORD` in `.env`. Both Compose apps default to Supabase Auth; set
+`UDHAAR_AUTH_PROVIDER=local` only for the isolated development stack if desired.
+The hosted-data stack always uses Supabase Auth.
+
+## Run without Docker
 
 ```powershell
-docker compose logs --tail 50 app db
-docker compose exec db psql -U udhaar -d udhaar
-docker compose down
-```
-
-Avoid `docker compose down -v` unless you intend to delete the local database.
-`POSTGRES_PASSWORD` initializes a new volume; changing it later in `.env` does not
-change an existing database password. Schema changes now use Alembic migrations.
-For an older unversioned database, back it up and run
-`docker compose run --build --rm migrate python -m backend.migrate baseline`
-once before starting the updated stack. See the database guide for validation
-and hosted staging; the two Compose stacks keep separate application data.
-
-## Quick start without Docker (SQLite)
-
-Requires **Python 3.10+**. Run the following from this folder:
-
-```bash
 python -m venv .venv
-# macOS / Linux:
-source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python -m backend.migrate upgrade
-uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m backend.migrate upgrade
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Then open **http://127.0.0.1:8000** and create an account. You can add your first item right away; no frontend build, Node.js, or external API key is needed. The migration command initializes `udhaar.sqlite3`, which keeps records across restarts. Existing unversioned databases need a backup and `python -m backend.migrate baseline` before upgrading. API documentation is at `http://127.0.0.1:8000/api/docs`.
+This defaults to SQLite and local password authentication when no environment
+variables are set. On macOS/Linux use `.venv/bin/python`. Python does not load
+`.env` automatically; Compose does. Private records work without external email
+configuration. Email delivery requires a configured Resend sender and public URL.
 
-### Try the hybrid workflow
+## Update the public app
 
-1. Register an account and create a **Lent** record for a tool with **Off the Record** selected.
-2. View it on the dashboard, edit its details, and explore private return tracking.
-3. Create a second record, open the record, and choose **Move to On the Record** or choose On the Record at creation.
-4. Generate a share link. In a separate browser/private window, paste the link to act as the recipient.
-5. Acknowledge the loan. The borrower can then report a return; the lender confirms it in the original account. (For records created with **Borrowed** direction, the guest acts as the lender.)
-
-**Note:** Acknowledgment confirms only that someone with the invitation link responded. It is *not* verified identification, legal proof of a debt, or confirmation of a payment.
-
-## Tech choices
-
-| Layer | Implementation |
-|---|---|
-| Backend | FastAPI (Python), JSON REST endpoints |
-| Database | SQLAlchemy + Alembic; Docker PostgreSQL locally, Supabase PostgreSQL for hosted staging, optional local SQLite |
-| Frontend | Responsive HTML + vanilla JavaScript + CSS; no build step |
-| Authentication | Supabase email OTP with server validation, HTTP-only token cookies, local identity mapping, CSRF checks; optional legacy local password mode |
-| Sharing | Opaque random bearer invitation token; only its SHA-256 hash is stored |
-| Hosted database | Supabase Session pooler via `compose.supabase.yaml`; private `udhaar` schema |
-
-**Why not Django/React yet?** The agreed early design suggested Django REST Framework + React/TypeScript. For this runnable artifact we used a lightweight server and no-build frontend, since this execution environment cannot fetch those dependencies. This is a pragmatic MVP implementation, not a change to the product architecture commitment. A Django/React production rebuild can preserve the same models, lifecycle and REST API semantics.
-
-## Core data model
-
-```text
-User 1 — * Contact
-User 1 — * Record (kind=ITEM, direction=LENT|BORROWED, mode=OFF|ON)
-Record 1 — 1 ItemLoan (item name, category, quantity)
-Record 1 — * ItemReturn (quantity, proposed by, status, confirmed by)
-Record 1 — * Invitation (hashed token, expiry, state)
-Record 1 — * RecordEvent (actor, change type, timestamp)
-```
-
-When money tracking is introduced later, add a distinct `MoneyLoan` extension (`principal_decimal`, `currency`) and `Repayment` table. Keep settlement logic separate for items and money. Do **not** treat item quantities as money amounts; use decimals and confirmed repayments for monetary balances.
-
-## Main endpoints
-
-- `POST /api/register`, `/api/login`, `/api/logout`, `GET /api/me`
-- `GET /api/records`, `POST /api/records`, `GET /api/records/{id}`, `PATCH /api/records/{id}`
-- `POST /api/records/{id}/share` with `{ "email": "recipient@example.com" }`
-- `GET /api/app-invites`, `POST /api/app-invites`, `POST /api/app-invites/{id}/retry`
-- `GET /api/inbox`, `GET /api/inbox/{id}`, `POST /api/inbox/{id}/respond`
-- `POST /api/inbox/{id}/returns`, `POST /api/inbox/{id}/returns/{return_id}/confirm`
-- `POST /api/records/{id}/returns`, `POST /api/records/{id}/returns/{return_id}/confirm`
-- `GET /api/share/{token}`, `POST /api/share/{token}/respond`
-- `POST /api/share/{token}/returns`, `POST /api/share/{token}/returns/{return_id}/confirm`
-
-Mutating requests require a CSRF token from `GET /api/csrf`. The browser UI handles this automatically.
-
-## Automated tests
-
-```bash
-pip install -r requirements-dev.txt
-python -m pytest -q tests
-```
-
-Tests cover privacy/isolation, acknowledgment, duplicate response rejection, lender-only confirmation, partial returns, outstanding-quantity safeguards, link revocation, declined invitations, invalid dates and CSRF protection.
-
-Session browser regressions (Node.js 20+, installed Microsoft Edge, and the Docker
-app running) are available separately:
+For code changes without a new database migration:
 
 ```powershell
+vercel deploy --prod
+```
+
+If a migration changed, apply it first using the existing session-pooler release
+path, then deploy compatible code:
+
+```powershell
+docker compose -f compose.supabase.yaml run --rm --build migrate
+vercel deploy --prod
+```
+
+Vercel checks the database schema during builds. Its Production environment
+variables are separate from local `.env`; public emails use the cloud
+`UDHAAR_PUBLIC_URL`. See the [deployment guide](docs/vercel-deployment.md) for
+setup, credentials, connection pooling, and the Hobby plan's use limits.
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+docker compose -f compose.yaml --profile test run --build --rm tests
 npm ci --prefix tests/browser
+npm run test:invitations --prefix tests/browser
+```
+
+API tests use temporary SQLite databases or isolated PostgreSQL schemas when
+`TEST_DATABASE_URL` is provided. Browser invitation tests start a disposable local
+server. Test email delivery and provider Auth calls are simulated.
+Session browser checks use an already running Supabase-mode app:
+
+```powershell
+$env:UDHAAR_TEST_BASE_URL='http://localhost:8001'
 npm test --prefix tests/browser
 ```
 
-These checks exercise the real frontend with simulated session responses and an
-anonymous live-server check. They send no email. See the
-[authentication testing guide](docs/supabase-implementation.md#testing-and-acceptance)
-for coverage, browser configuration, and remaining live-provider checks.
+Use a modern Node.js runtime and Microsoft Edge; browser overrides are described
+in the [Auth guide](docs/supabase-implementation.md). Interactive API documentation
+is available at `/api/docs` and the schema at `/api/openapi.json`.
 
-## Important limits before any public launch
+## Documentation
 
-This is a small-group development prototype. Before deployment to untrusted users, add:
+| Guide | Covers |
+| --- | --- |
+| [Architecture and schema](docs/understanding-the-setup.md) | Components, ten app tables, permissions, and loan lifecycle |
+| [Authentication](docs/supabase-implementation.md) | Email-code setup, cookies, session refresh, logout, and tests |
+| [Auth rate limits](docs/auth-rate-limits.md) | Browser, process, Supabase, and sender limits |
+| [Database and migrations](docs/supabase-database.md) | Connection modes, SQL inspection, schema access, and upgrades |
+| [Email invitations](docs/email-invitations.md) | Resend setup, daily invite slots, guest links, and delivery |
+| [Vercel deployment](docs/vercel-deployment.md) | Public hosting and cloud environment configuration |
+| [Operations](docs/operations.md) | Releases, monitoring, backups, recovery, and privacy requests |
 
-- HTTPS, secure cookies (`UDHAAR_COOKIE_SECURE=true`) and correctly configured host/origin restrictions.
-- Database backups and restore testing, migration release reviews, transaction isolation/locking for concurrent returns, and safe operational monitoring.
-- Email verification for higher-trust acknowledgment; abuse protection, login rate limiting, account recovery and invitation revocation UI.
-- Thorough accessibility, end-to-end/browser, security, and load testing; privacy policy, data export/deletion flows and retention rules.
-- Invitation-link handling safeguards (they grant bearer access to the specific loan). Sharing identity has not been verified.
-- Support for edited acknowledged terms through explicit versioning and renewed acknowledgment; the MVP deliberately locks shared records after an invitation rather than silently rewriting agreed details.
+## Privacy, rights, and scope
 
-### Future insights and AI
+Read the [Privacy notice](PRIVACY.md), [Terms of use](TERMS.md), and
+[Rights and licensing](RIGHTS.md). The same documents are available inside the app
+at `/privacy`, `/terms`, and `/rights`; the full MIT text is at `/license`.
+The MIT grant applies to the source and documentation, not private user data.
 
-The MVP calculates **personal** counts for the signed-in user. It does not run a background analytics collector. For potential future Udhaar Insights, define item categories and opt-in consent, collect only minimal eligible events, aggregate carefully, and use retention controls to prevent identifying people or reverse-engineering private records. A simple rule-based borrowing-frequency insight should precede any AI product recommendations. **Off the Record records stay hidden from other users**, and no individual notes/contact data should ever be sold as marketing data.
+This is a public testing release for item tracking. Account deletion/export need
+manual assistance, the OTP cooldown is process-local, and the runtime currently
+uses the database table-owner connection. Provider quotas, backups, and logs need
+active operational management. There are no payments, money-loan accounting, or
+automated reminders. See [Operations](docs/operations.md) for current limits.
 
-## Directory structure
-
-```text
-udhaar_mvp/
-  backend/
-    main.py       # API, auth, sharing and return business rules
-    models.py     # SQLAlchemy data models
-  static/
-    index.html    # SPA entry point
-    app.js        # Client state and views
-    style.css     # Responsive layout
-  tests/
-    test_mvp.py   # API tests
-  requirements.txt
-  README.md
-```
-
-Built as an implementation of our October 2026 Udhaar product conversation.
-
-## Simple sharing
-
-- **Loan links** (`/share/<token>`): anyone holding the link can view and acknowledge the loan without an account, then revisit the same link for returns. The sender is responsible for sharing with the right person; identity is not verified. Borrowers report returns and lenders confirm receipt. Private notes remain hidden. Links expire after 30 days; replacing one invalidates the previous link and requires fresh acknowledgment.
-- **App invitations** (`/signup`): use **Invite friends**, enter an email, and send a regular invitation through Resend. Each account gets two invitations per UTC calendar day. The database preserves this allowance across restarts and concurrent requests. An uncertain or failed delivery keeps its slot and can be retried with the same Resend idempotency key for up to 23 hours without using another slot.
-- **On the Record loans** require the other person's email when created or converted. A registered app profile receives a request in **Acknowledgments**, refreshed every 30 seconds while the tab is visible, and can acknowledge and handle returns there. Otherwise, Resend emails a guest loan link with an optional signup link. These acknowledgment emails have no application daily cap and never use regular app-invite slots; Resend's account sending limits still apply. Signing up later does not automatically claim an older anonymous loan link.
-- Configure `RESEND_API_KEY`, `UDHAAR_EMAIL_FROM` (a verified sender), and `UDHAAR_PUBLIC_URL` (a reachable HTTPS origin) in `.env`. Supabase's SMTP integration only sends authentication emails; application invitations call the Resend API directly. No Supabase admin/service-role key is needed. See [email invitation setup](docs/email-invitations.md).
-
-### Two separate acknowledgments
-
-1. **Handover**: the loan-link holder acknowledges "I took / borrowed this item" when the owner lent it, or "I gave / lent this item" when the owner borrowed it.
-2. **Return / completion**: the lender acknowledges receipt of returned items. A borrower reporting a return leaves it pending until the lender acknowledges. Partial returns do not complete the loan; all quantities must be confirmed. The handover acknowledgment remains recorded independently.
-
-The API exposes `handover_acknowledgment` and `return_acknowledgment` separately. The existing `acknowledgment` field remains an alias for handover. Return acknowledgment is derived from the saved return records; no extra database migration is needed. Both stages use the same loan link within its existing expiry.
+Security reports and contact guidance are in [SECURITY.md](SECURITY.md).
+Do not put personal data, credentials, or guest links in public issues.

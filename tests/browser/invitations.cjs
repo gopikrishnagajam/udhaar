@@ -103,5 +103,17 @@ async function createLoan(page, name, email, on=true) {
   assert.equal(await guest.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   assert.deepEqual(errors, []);
   results.push('Guest screen fits mobile width; no JavaScript errors');
+  for (const [route, heading] of [['privacy', 'Privacy notice'], ['terms', 'Terms of use'], ['rights', 'Rights and licensing']]) {
+    await guest.goto(`${base}/${route}`);
+    await guest.getByRole('heading', {name:heading, exact:true}).waitFor();
+    assert.equal(await guest.locator('.policy-header [aria-current=page]').count(), 1);
+    assert.equal(await guest.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    assert.match(await guest.locator('.site-footer').textContent(), /Gopi krishna Gajam/);
+  }
+  await guest.locator('.policy-header a[href="/"]').first().click();
+  await guest.locator('#auth-form').waitFor();
+  assert.equal(await guest.locator('.site-footer nav a').count(), 3);
+  assert.deepEqual(errors, []);
+  results.push('Public privacy, terms and MIT rights pages work on mobile and link back to sign in');
   console.log(JSON.stringify({passed:results.length, results}, null, 2));
 })().catch(error => {console.error(error); console.error(logs); process.exitCode=1;}).finally(async()=>{if(browser)await browser.close();server.kill();});

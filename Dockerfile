@@ -7,6 +7,7 @@ COPY backend ./backend
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY static ./static
+COPY PRIVACY.md TERMS.md RIGHTS.md LICENSE NOTICE ./
 ENV UDHAAR_COOKIE_SECURE=true
 EXPOSE 8000
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

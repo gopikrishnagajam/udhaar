@@ -1,400 +1,103 @@
-# Supabase authentication in Udhaar
+# Authentication setup and sessions
 
-For a learning-oriented explanation of the whole application, including loan
-acknowledgments and database tables, see [Understanding the setup](understanding-the-setup.md).
+## Hosted sign-in
 
-## Purpose and scope
+The public app and hosted-data Compose stack use Supabase email codes. An app
+profile is provisioned after successful verification and linked to the provider
+issuer/subject. A contact is not automatically a registered profile. No Supabase
+admin key or service-role key is required by the app.
 
-Udhaar uses hosted Supabase Auth to verify users through email one-time codes.
-FastAPI manages the browser-facing login endpoints. Local PostgreSQL stores the
-application profiles, contacts, loans, shared links, acknowledgments, and returns.
-The same Docker Compose stack also runs pgAdmin for inspection.
+1. In Supabase, enable email authentication and configure custom SMTP using Resend
+   credentials for a verified sender. Authentication emails are sent by Supabase
+   through Resend SMTP.
+2. Set the email template to include the one-time code, for example
+   `Your Udhaar sign-in code is {{ .Token }}`. The UI accepts a 6-10 digit code.
+   The configured template and expiry must match the provider's actual settings.
+3. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in the backend environment.
+   Never replace the publishable key with a server secret key.
+4. Use `UDHAAR_AUTH_PROVIDER=supabase`. Docker passes `.env` values into the app;
+   Vercel has its own Production environment variables.
 
-Supabase necessarily stores authentication identities and session information in
-its own project database. The default local stack keeps application data in
-Docker PostgreSQL. The separate [hosted database setup](supabase-database.md)
-stores application data in Supabase's private `udhaar` schema through SQLAlchemy.
-Neither setup uses Storage or the Data API. Display names are application data,
-not Auth user metadata. Only email and authentication credentials go to the Auth
-endpoints. See [Supabase Auth](https://supabase.com/docs/guides/auth).
+The UI requests `/api/auth/otp`, verifies through `/api/auth/verify`, and loads the
+profile through `/api/me`. Supabase creates an Auth account only when signup is
+requested. Existing-account signup is rejected locally before sending another
+code. A provider email-address collision with a legacy local account requires
+manual account migration; app records are not reassigned by email.
 
-Loan-link guests do not need an account. They still acknowledge handover and
-returns through the existing expiring bearer link. This document describes
-account authentication; it does not replace loan-link permissions.
+## Tokens and validation
 
-## Architecture
+| Cookie | Access | Scope and lifetime |
+| --- | --- | --- |
+| `udhaar_sb_access` | HTTP-only | `/`; provider's access-token lifetime |
+| `udhaar_sb_refresh` | HTTP-only | `/api/auth`; browser cap 14 days; provider controls validity |
+| `udhaar_csrf` | Browser-readable | `/`; session cookie matched by mutation headers |
+| `udhaar_session` | HTTP-only, local mode only | `/`; hashed DB session, 14 days |
 
-```mermaid
-flowchart TB
-    Browser[Browser: existing HTML and JavaScript]
-    API[FastAPI: authentication and loan rules]
-    Auth[Hosted Supabase Auth]
-    Mail[Email inbox]
-    DB[(Local PostgreSQL)]
-    Admin[Local pgAdmin]
-    Browser -->|Same-origin requests and HTTP-only cookies| API
-    API -->|HTTPS: request code, verify, user, refresh, logout| Auth
-    Auth -->|Sign-in code through configured email delivery| Mail
-    Mail -->|User enters code| Browser
-    API -->|Profiles, identity mapping, loan data| DB
-    Admin -->|Inspect database| DB
+Hosted cookies use `Secure` and SameSite=Lax. Tokens are not returned to frontend
+JavaScript or stored in web storage. Normal protected requests verify JWT
+signature and issuer/audience/expiry/subject/role claims using cached Supabase
+public keys. ES256 and RS256 are supported; unsigned and HS256 tokens are rejected.
+Verification and refresh also validate provider user information over HTTPS.
+
+On a protected API 401, the frontend attempts a single refresh and retries once.
+Parallel requests in one tab share the refresh promise. A permanent refresh
+failure clears the signed-in UI; a provider outage/rate limit retains its status
+and explanation. Different browser tabs still refresh independently.
+
+Logout clears browser sign-in cookies and attempts to revoke that device's
+Supabase session, using the refresh token if the access token is stale. Local
+signout still succeeds when the provider is unavailable. Issued access tokens
+may remain usable until expiry; immediate provider revocation is not checked on
+every locally verified JWT request.
+
+Supabase-managed sessions can be inspected in SQL Editor without displaying
+tokens:
+
+```sql
+SELECT s.id, u.email, s.created_at, s.updated_at
+FROM auth.sessions s
+JOIN auth.users u ON u.id = s.user_id
+ORDER BY s.created_at DESC
+LIMIT 100;
 ```
 
-This is a server-side integration rather than a browser SDK integration. It fits
-the current same-origin application and does not require React, a frontend build,
-or loading a third-party authentication script. The publishable key and provider
-tokens are not returned to frontend JavaScript.
+A session row is not an online-presence indicator. An empty `udhaar.login_sessions`
+table is expected when using Supabase Auth.
 
-Authentication answers which account is signed in. FastAPI authorization still
-checks record ownership, the guest's loan token, and the lender's role when a
-return is confirmed. A successful login does not grant access to other users'
-records.
+## Local password mode
 
-## Required Supabase project setup
+`UDHAAR_AUTH_PROVIDER=local` enables `/api/register`, `/api/login`, and `/api/logout`
+for isolated development. Passwords use Argon2; session tokens are hashed in
+`login_sessions`. Production configuration refuses this mode. Switching providers
+does not automatically convert accounts or transfer profiles/records.
 
-**Custom SMTP is a prerequisite for this code-based flow on newly created Free
-projects.** Since June 3, 2026, those projects cannot edit authentication templates
-while using Supabase's default sender. Configure your own SMTP before changing
-the templates below. Pro and older projects have different template permissions;
-email-delivery restrictions still need to be considered. See
-[Supabase's template-customization announcement](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
+## Troubleshooting and tests
 
-For local testing, a hosted SMTP sandbox such as Mailtrap Email Sandbox can
-capture authentication emails in a web inbox, without delivering them to actual
-recipients. Copy the sandbox SMTP credentials into Supabase's **Authentication >
-Email > SMTP Settings** manually; the production Mailtrap integration is a
-different product. Read codes from the sandbox inbox, then enter them in Udhaar.
-Use a real transactional email provider and verified sender for public users.
-See [Mailtrap sandbox setup](https://docs.mailtrap.io/email-sandbox/setup).
+- Code missing: inspect Supabase Auth logs and Resend delivery records. Check SMTP
+  credentials, verified domain/sender, template, suppression/bounce state, and quotas.
+- HTTP 429: respect `Retry-After`; see [rate limits](auth-rate-limits.md).
+- Session disappears on local HTTP: secure cookies require HTTPS; local Compose
+  sets them false while Vercel sets them true.
+- Browser APIs unavailable: inspect `/api/auth/config`, `/api/health`, and server
+  logs. Never paste full cookies or provider responses into public issues.
 
-1. Use a development project, enable Email authentication, and allow signups.
-2. Set the Site URL to `http://localhost:8000`, or your configured application port.
-   This integration uses typed codes, so no OAuth callback route is required.
-3. In **Authentication > Email > Templates**, update **both Confirm sign up**
-   and **Magic Link / OTP** templates to include the code variable:
-
-   ```html
-   <h2>Your Udhaar sign-in code</h2>
-   <p>{{ .Token }}</p>
-   ```
-
-   Configure a code length supported by the UI (6–10 digits). The default
-   passwordless email flow sends a link; the templates make this a code experience.
-   New or unconfirmed accounts use **Confirm sign up**; confirmed accounts use
-   **Magic Link / OTP**. Save both so the first signup and subsequent sign-ins
-   deliver codes. See [email templates](https://supabase.com/docs/guides/auth/auth-email-templates)
-   and [email OTP configuration](https://supabase.com/docs/guides/auth/auth-email-passwordless).
-4. Verify that custom SMTP is configured and enabled before testing delivery.
-   Supabase's built-in sender is limited to team-member addresses and does not
-   permit the template customization this flow needs on new Free projects.
-   A successful local unit test cannot validate email delivery. See
-   [SMTP restrictions and setup](https://supabase.com/docs/guides/auth/auth-smtp).
-5. Put the project URL and publishable key in the ignored local `.env`:
-
-   ```dotenv
-   UDHAAR_AUTH_PROVIDER=supabase
-   SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-   SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
-   ```
-
-   Use the project base URL, without `/auth/v1` or a trailing path. HTTPS is
-   required. No database password or service-role key from Supabase is needed.
-   The local Postgres password remains a separate Compose setting.
-6. Recreate the app to load the variables:
-
-   ```powershell
-   docker compose up --build -d --wait app
-   ```
-
-   `.env` is read by Compose, not automatically by a Python process launched
-   directly on the host. For a direct Python launch, export the variables into
-   that process environment.
-
-Do not put keys in this document, frontend files, screenshots, or commits. See
-[Supabase API keys](https://supabase.com/docs/guides/getting-started/api-keys).
-
-## Signup and login flow
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant UI as Browser
-    participant API as FastAPI
-    participant SB as Supabase Auth
-    participant PG as Local PostgreSQL
-    User->>UI: Enter email and name for signup
-    UI->>API: POST /api/auth/otp with CSRF token
-    API->>SB: POST /auth/v1/otp
-    SB-->>User: Email sign-in code
-    User->>UI: Enter received code
-    UI->>API: POST /api/auth/verify
-    API->>SB: POST /auth/v1/verify
-    SB-->>API: Access and refresh tokens
-    API->>SB: GET /auth/v1/user using access token
-    SB-->>API: Verified identity and confirmed email
-    API->>PG: Find identity or create local profile and mapping
-    API-->>UI: Local profile and Set-Cookie headers
-    UI->>API: GET /api/records with cookies
-    API-->>UI: Only this user's records
-```
-
-Signup requests send `create_user: true`; sign-in requests send
-`create_user: false`. Code requests return a generic eligibility message. The
-backend checks the confirmed email and rejects anonymous identities or an email
-different from the one being verified. Names are display text, not proof of
-identity. Email control is not verification of a real-world person.
-
-No shared mutable Supabase SDK session is used. Each provider request has its own
-HTTP client, explicit credentials, timeout, and fixed configured HTTPS destination.
-This avoids one user's provider session leaking into another request.
-
-## Protected requests, refresh, and logout
-
-For ordinary protected requests, FastAPI verifies the JWT signature and claims
-locally with PyJWT using Supabase's public JWKS keys, cached for ten minutes.
-It checks issuer, audience, expiration, issued-at, user UUID, authenticated role,
-and non-anonymous status. ES256 and RS256 projects are supported; legacy HS256
-tokens are rejected. The configured project advertises ES256.
-The provider `/user` endpoint is still used when establishing or refreshing a
-session, before accepting its verified identity. This removes an Auth API call
-from each normal application request. See [JWT validation](https://supabase.com/docs/guides/auth/jwts).
-User deletion, banning, or email changes at the provider are not rechecked on
-every local JWT validation; an issued token can remain accepted until expiry.
-
-```mermaid
-flowchart TD
-    A[Request protected endpoint] --> B{JWT signature and claims valid locally?}
-    B -->|Yes| C[Find local identity and enforce record permissions]
-    B -->|401| D[Frontend requests refresh once with CSRF token]
-    D --> E{Refresh accepted and local profile exists?}
-    E -->|Yes| F[Set rotated cookies and retry original request once]
-    E -->|401| G[Clear signed-in UI and require sign-in again]
-    E -->|429| J[Keep retry interval and explain rate limit]
-    E -->|503 or network failure| K[Explain temporary failure and allow retry]
-    B -->|Required signing keys unavailable| H[Return 503; no local-auth fallback]
-    C --> I[Return authorized data]
-```
-
-The frontend shares an in-flight refresh promise within the page so simultaneous
-requests do not each try to rotate the same refresh token. It does not refresh
-anonymous loan-link requests. Session changes in multiple browser tabs still rely
-on the provider's refresh reuse behavior; there is no cross-tab coordination yet.
-
-A rejected refresh clears the signed-in profile, cached records, shared-link
-state, and open dialogs before showing the sign-in form. A temporary failure
-does not mark the session as permanently expired. At startup, the form explains
-the failure and offers **Retry session**, which reloads and rechecks the existing
-cookies without sending an email. A refresh 429 keeps its status and retry
-interval; the startup retry button counts down before it can be used.
-
-| Cookie | Purpose | Browser access | Lifetime and scope |
-|---|---|---|---|
-| `udhaar_sb_access` | Supabase access token | HTTP-only | Provider `expires_in`, path `/` |
-| `udhaar_sb_refresh` | Refresh provider session | HTTP-only | Browser persistence cap of 14 days, path `/api/auth` |
-| `udhaar_csrf` | Double-submit CSRF check | Readable by JavaScript | Existing CSRF mechanism, path `/` |
-
-Authentication cookies use `SameSite=Lax`. Compose uses plain HTTP locally and
-therefore `Secure=false`; production must use HTTPS and secure cookies. Tokens
-are stored in browser cookies, not local PostgreSQL or browser localStorage.
-HTTP-only does not remove the need to prevent script injection and protect CSRF.
-
-Sign-out requests provider revocation with `scope=local`, clears this browser's
-auth cookies, and leaves local profiles and loans intact. If the access cookie
-is missing or Supabase rejects it, sign-out attempts refresh to obtain a token
-for revocation. It does not retry rate limits or service outages, and does not
-send the temporary tokens from this logout fallback back to the browser.
-During an outage it still clears browser cookies and returns
-`provider_session_revoked: false`. Already-issued access tokens should not be
-assumed instantly unusable after logout; provider token expiration and revocation
-semantics still apply. See [Supabase sessions](https://supabase.com/docs/guides/auth/sessions).
-
-## Local data model and compatibility
-
-```mermaid
-erDiagram
-    USER ||--o{ AUTH_IDENTITY : maps
-    USER ||--o{ RECORD : owns
-    RECORD ||--o{ INVITATION : shares
-    RECORD ||--o{ ITEM_RETURN : tracks
-    USER {
-        string id PK
-        string name
-        string email UK
-        string password_hash
-    }
-    AUTH_IDENTITY {
-        string id PK
-        string issuer
-        string subject
-        string user_id FK
-    }
-```
-
-`auth_identities` has a unique `(issuer, subject)` pair. `issuer` is the configured
-project URL plus `/auth/v1`; `subject` is the verified Supabase UUID. Including the
-issuer prevents changing projects from silently reusing an unrelated identity.
-Application foreign keys continue referencing the existing local `users.id`.
-
-New OTP profiles have an empty, unusable `password_hash` to retain compatibility
-with the current non-null database column. No password is collected. Legacy
-`login_sessions` is unused in Supabase mode. Both local password endpoints and
-legacy session-cookie authentication are disabled in that mode.
-
-Existing local users and loans are preserved. We deliberately do not attach a
-Supabase identity to a legacy profile just because email strings match. The first
-verified sign-in with a colliding email returns 409 and requires an explicit
-future migration. For initial testing, use an email not already used by a legacy
-local profile. Repeated verified logins reuse the same mapped profile.
-
-The mapping table is now managed by versioned Alembic migrations. The app checks
-the database revision at startup and does not create tables itself. Existing
-unversioned databases require validated baseline adoption before upgrading;
-see the database guide. Concurrent profile-creation conflicts roll back and
-resolve the existing mapping when possible.
-
-## Endpoints and changed code
-
-| Endpoint | Behavior |
-|---|---|
-| `GET /api/auth/config` | Provider, method, configuration readiness; no credentials |
-| `POST /api/auth/otp` | Request signup/sign-in email code |
-| `POST /api/auth/verify` | Verify code, validate identity, provision profile, set cookies |
-| `POST /api/auth/refresh` | Rotate provider session and cookies |
-| `POST /api/auth/logout` | Attempt revocation and clear browser cookies |
-| `GET /api/me` | Return mapped local profile after provider validation |
-| Existing `/api/records` endpoints | Same ownership rules, new authentication dependency |
-| Existing `/api/share/...` endpoints | Same anonymous bearer-link access |
-
-All POST authentication endpoints require the existing CSRF cookie/header pair.
-
-| File | Change |
-|---|---|
-| `backend/supabase_auth.py` | Provider HTTP adapter, email validation, OTP endpoints, identity mapping, cookies, refresh/logout, bounded rate limiting |
-| `backend/main.py` | Register auth routes, select authentication mode, block legacy password endpoints in Supabase mode |
-| `backend/models.py` | Add `AuthIdentity` without changing application ownership IDs |
-| `static/app.js` | Email/code forms, resend, setup message, one automatic refresh/retry, correct sign-out route |
-| `requirements.txt` | Promote HTTPX to a runtime dependency |
-| `compose.yaml` | Pass auth settings to app; explicitly keep legacy regression tests in local mode |
-| `.env.example` | Document required environment variables |
-| `tests/conftest.py` | Share isolated database fixtures across both test modules |
-| `tests/test_supabase_auth.py` | Simulate provider HTTP for authentication/security regressions |
-| `scripts/smoke_test.py` | Prevent the older password smoke test running against OTP mode |
-
-The application enforces one code-send attempt per email per 60 seconds, five
-sends per IP per minute, ten code-request/preflight checks per IP/email per
-minute, and ten verification attempts per IP/email per minute. Counts are
-process-local and reset on restart. Duplicate signups are rejected from the
-local `users` table before sending email and do not consume the email-send cooldown.
-Supabase-only identities with no completed local profile can finish signup.
-Provider limits also apply to server-originated requests. See the detailed
-[rate-limit and signup guide](auth-rate-limits.md).
-
-## Testing and acceptance
-
-Implementation validation: **65 automated tests passed against local PostgreSQL
-in Docker**. JavaScript syntax checking also passed. The running Docker app has
-also successfully authenticated a read-only settings request against the real
-Supabase project: email authentication is enabled, signups are allowed, and email
-auto-confirm is disabled. Real email delivery and code verification still require
-the manual test below; a successful settings request does not establish delivery.
-
-Run automated tests against PostgreSQL:
-
-```powershell
-docker compose --profile test run --build --rm tests
-```
-
-The suite covers both auth modes. Supabase responses are simulated with HTTPX
-MockTransport; no real email, service-role key, or Supabase admin user is needed.
-Each test uses an isolated database schema and removes it afterward.
-
-Authentication scenarios include local profile creation, no stored password or
-tokens, stable identity mapping, account isolation, secure cookie attributes,
-refresh rotation, invalid codes, CSRF, legacy-cookie/password bypass rejection,
-email collisions, provider outage, logout during outage, unverified identities,
-rate limiting, missing configuration, and anonymous loan completion.
-
-Browser session regression checks run the real frontend in headless Edge against
-the running app. Most session API responses are simulated; the final check uses
-the live local server to verify anonymous requests and CSRF rejection. **16 checks
-passed**, including expiry cleanup, one refresh for parallel requests within a
-tab, shared refresh errors, logout, startup outage recovery, rate-limit metadata,
-retry countdowns, and HttpOnly-cookie behavior. The audit also reran **31 temporary
-backend session checks, all passing**; these diagnostic checks are separate from
-the committed suite. Database migration and security coverage and actual hosted
-database checks are described in the [database guide](supabase-database.md).
-
-With Node.js 20+ and Microsoft Edge installed, start the Docker app, then run:
+`tests/test_supabase_auth.py` simulates the provider at the HTTP boundary and uses
+signed test JWTs. It covers profile stability, account isolation, cookie rotation,
+invalid claims, rate limits, outages, and anonymous loan completion without
+sending real email. Browser session checks run against a configured Supabase-mode
+app:
 
 ```powershell
 npm ci --prefix tests/browser
-npm test --prefix tests/browser
+$env:UDHAAR_TEST_BASE_URL='http://localhost:8001'
+node tests/browser/sessions.cjs
 ```
 
-Browser tests are a development dependency only; the app still needs no frontend
-build step. For a different installed Chromium browser, set
-`UDHAAR_TEST_BROWSER_PATH` to its executable. `UDHAAR_TEST_BASE_URL` overrides
-`http://127.0.0.1:8000`. No browser test sends login emails or uses an existing
-browser profile. Real Supabase multi-device revocation, concurrent-tab refresh
-rotation, and session persistence across backend restarts still need live-provider
-verification.
+The default browser is installed Microsoft Edge. Override
+`UDHAAR_TEST_BROWSER_CHANNEL` or `UDHAAR_TEST_BROWSER_PATH` when needed. Real
+delivery, multi-device revocation, and multi-tab refresh races need provider-level
+testing in addition to simulated regressions.
 
-After configuring the real project, complete this manual check:
-
-1. Open `http://localhost:8000/signup`, enter a name and eligible test email.
-2. Confirm the real email arrives, enter the code, and reach the dashboard.
-3. In pgAdmin inspect `public.users` and `public.auth_identities`: the mapping
-   exists, the name is local, and no provider tokens are stored.
-4. Create a loan. Refresh the browser; the same profile and loan should load.
-5. Sign out, confirm account endpoints reject access, and sign back in. The local
-   profile ID should remain unchanged.
-6. Open a loan link in a private browser window; acknowledge and complete a
-   return without signing in.
-7. Test a second account and confirm it cannot read the first account's records.
-8. Remove only the access cookie in browser developer tools, keep the refresh
-   cookie, and reload. The browser should refresh and restore access.
-9. Confirm the stored Supabase user has an email identity; no Udhaar loan tables
-   or profile metadata were uploaded.
-
-Automated tests demonstrate code behavior against a simulated provider. Only the
-manual real-project check demonstrates project configuration and email delivery.
-
-### Troubleshooting a 503 while requesting a code
-
-If `/api/auth/otp` returns 503 but Supabase's read-only `/settings` request works,
-the project URL and API key can be valid while email delivery is failing. Check
-**Supabase > Authentication > Logs** for the precise SMTP or email-template error.
-Verify that the SMTP host is just a hostname (no `https://` or embedded port),
-the port is correct, and username/password come from the same SMTP product.
-Mailtrap Email Sandbox credentials differ from its Email Sending credentials.
-For Sandbox, messages appear in the Mailtrap web inbox, not the recipient's Gmail.
-
-If the Auth log says `tls: first record does not look like a TLS handshake`,
-the SMTP connection is using a TLS mode inconsistent with the server response.
-For Mailtrap Sandbox, use `sandbox.smtp.mailtrap.io` with port `587` and the
-sandbox credentials. Mailtrap Sandbox supports STARTTLS; using port `465` can
-cause a client to attempt implicit TLS before the SMTP greeting. Save the SMTP
-settings in Supabase and request a fresh code. No Docker restart is needed.
-For another provider, use that provider's documented port/encryption combination.
-
-The app logs the provider endpoint, upstream status, and a sanitized error code.
-It does not log email addresses, token values, request bodies, or raw SMTP error
-messages. Run `docker compose logs --tail 50 app` after one failed attempt. The
-email-send timeout is 30 seconds, with a 5-second connection timeout; ordinary
-authentication requests keep a 10-second timeout. No code request is automatically
-retried, to avoid duplicate emails and triggering provider limits.
-
-## Development mode and production follow-up
-
-For the earlier password workflow, set `UDHAAR_AUTH_PROVIDER=local` and recreate
-the app container. This is an explicit development switch, not a fallback when
-Supabase is unavailable. Direct host Python defaults to local mode unless the
-environment says otherwise. Never use that switch as an outage workaround for a
-public deployment.
-
-Before production: enable HTTPS and secure cookies, review migration releases,
-distributed rate limits and monitoring, decide account migration/deletion policy,
-configure reliable SMTP, and test session behavior across browsers and failures.
-Supabase manages authentication infrastructure; Udhaar still manages application
-permissions, privacy choices, local backups, and retention. See
-[shared responsibilities](https://supabase.com/docs/guides/deployment/shared-responsibility-model).
+References: [Supabase email OTP](https://supabase.com/docs/guides/auth/auth-email-passwordless),
+[SMTP](https://supabase.com/docs/guides/auth/auth-smtp),
+[sessions](https://supabase.com/docs/guides/auth/sessions).
