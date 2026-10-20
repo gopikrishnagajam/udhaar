@@ -28,9 +28,11 @@ def policy_page(name):
     html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Udhaar {escape(title)}"><title>{escape(title)} | Udhaar</title>
+<link rel="icon" type="image/png" href="/static/branding/logo.png">
+<link rel="apple-touch-icon" href="/static/branding/logo.png">
 <link rel="stylesheet" href="/static/style.css"></head><body class="policy-body">
 <a class="skip-link" href="#policy-content">Skip to content</a>
-<header class="policy-header"><a class="brand" href="/" aria-label="Udhaar home">udhaar<span class="brand-dot">.</span></a>
+<header class="policy-header"><a class="brand" href="/" aria-label="Udhaar home"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36"></span>udhaar<span class="brand-dot">.</span></a>
 <nav aria-label="Policy navigation">{links}<a href="/">Back to app</a></nav></header>
 <main class="policy-content" id="policy-content">{content}</main>
 <footer class="site-footer"><span>&copy; 2026 <a href="{PROFILE}">{escape(OWNER)}</a></span>

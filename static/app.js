@@ -121,7 +121,7 @@ function acknowledgmentSummary(r) {
 function authScreen(message='', recovery=null) {
  if(authConfig.provider==='supabase') {supabaseAuthScreen(message,recovery);return;}
  $('#app').innerHTML = `<div class="auth-wrap">
- <section class="auth-intro"><div class="brand brand-light"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
+ <section class="auth-intro"><div class="brand brand-light"><img class="brand-wordmark" src="/static/branding/logo-ledger.png" alt="Udhaar" width="240" height="80" /></div>
  <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>That book you borrowed. The charger you lent. The things you meant to get back. All in one calm place.</p></div>
  <div class="auth-foot">✦ Less remembering. More living.</div></section>
  <section class="auth-panel"><div class="auth-box"><div class="auth-chip">${icon('shield',14)} Private by default</div><h2>${signup?'Make yourself at home.':'Welcome back.'}</h2><p>${signup?'Start keeping track of the things that matter.':'Your lending and borrowing, all accounted for.'}</p>
@@ -136,7 +136,7 @@ function authScreen(message='', recovery=null) {
 }
 function supabaseAuthScreen(message='', recovery=null) {
  $('#app').innerHTML=`<div class="auth-wrap">
- <section class="auth-intro"><div class="brand brand-light"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
+ <section class="auth-intro"><div class="brand brand-light"><img class="brand-wordmark" src="/static/branding/logo-ledger.png" alt="Udhaar" width="240" height="80" /></div>
  <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>A simple place for the things you lend and borrow.</p></div></section>
  <section class="auth-panel"><div class="auth-box"><div class="auth-chip">${icon('shield',14)} Sign in with an email code</div>
  <h2>${otpSent?'Check your inbox.':signup?'Make yourself at home.':'Welcome back.'}</h2>
@@ -170,7 +170,7 @@ function supabaseAuthScreen(message='', recovery=null) {
 }
 function topLayout(content) {
  $('#app').innerHTML=`<div class="layout"><aside class="sidebar" id="sidebar">
-   <div class="brand"><span class="brand-mark">${icon('package',23)}</span><span>udhaar<span class="brand-dot">.</span></span></div>
+   <div class="brand"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div>
    <div class="sidebar-caption">MY WORKSPACE</div><nav class="nav">
    <button data-tab="ALL" class="nav-link ${tab==='ALL'?'active':''}">${icon('grid',19)} Overview</button>
    <button data-tab="OFF" class="nav-link ${tab==='OFF'?'active':''}">${icon('lock',19)} Off the Record <span class="nav-count">${records.filter(r=>r.mode==='OFF').length}</span></button>
@@ -178,7 +178,7 @@ function topLayout(content) {
    <button data-tab="INBOX" class="nav-link ${tab==='INBOX'?'active':''}">${icon('check',19)} Acknowledgments <span class="nav-count" id="inbox-count">${inbox.filter(r=>r.invitation_state==='PENDING').length}</span></button>
    </nav><button id="invite-friends" class="btn btn-secondary">${icon('link',17)} Invite friends</button><div class="sidebar-spacer"></div><div class="sidebar-tip">${icon('spark',19)}<strong>Just a little reminder</strong><p>A record today saves an awkward conversation tomorrow.</p></div>
    <div class="sidebar-user"><span class="avatar">${esc((user.name||'U').slice(0,1).toUpperCase())}</span><span class="sidebar-username"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small></span><button title="Sign out" aria-label="Sign out" id="logout">${icon('logout',19)}</button></div>
- </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark">${icon('package',19)}</span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
+ </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
  $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render()});
  $('#invite-friends').onclick=()=>showSignupShare();
  $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});clearSignedInState();authScreen()}catch(err){toast(err.message)}};
@@ -303,8 +303,8 @@ setInterval(async()=>{if(!user||document.hidden||inboxPolling)return;inboxPollin
 async function guestPage(token){
  const wrap = $('#app');
  async function load(){
-  let r;try{r=await api(`/api/share/${encodeURIComponent(token)}`)}catch(err){wrap.innerHTML=`<div class="guest-wrap"><div class="guest-card"><div class="brand center"><span class="brand-mark">${icon('package',22)}</span>udhaar<span class="brand-dot">.</span></div><h2>Link unavailable</h2><p>${esc(err.message)}. Ask the sender for a new loan link.</p></div></div>`;return}
-  wrap.innerHTML=`<div class="guest-wrap"><div class="guest-card"><div class="brand center"><span class="brand-mark">${icon('package',22)}</span>udhaar<span class="brand-dot">.</span></div><div class="guest-eyebrow">A LITTLE SOMETHING TO CONFIRM</div>
+  let r;try{r=await api(`/api/share/${encodeURIComponent(token)}`)}catch(err){wrap.innerHTML=`<div class="guest-wrap"><div class="guest-card"><div class="brand center"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span>udhaar<span class="brand-dot">.</span></div><h2>Link unavailable</h2><p>${esc(err.message)}. Ask the sender for a new loan link.</p></div></div>`;return}
+  wrap.innerHTML=`<div class="guest-wrap"><div class="guest-card"><div class="brand center"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span>udhaar<span class="brand-dot">.</span></div><div class="guest-eyebrow">A LITTLE SOMETHING TO CONFIRM</div>
   <div class="guest-icon">${icon('package',27)}</div><h1>${esc(r.item_name)}</h1><p class="guest-intro">${esc(r.owner_name)} shared a loan link for you to acknowledge and track returns. No account is needed.</p>
   <div class="guest-facts"><div><small>Record direction</small><strong>${r.direction==='LENT'?`${esc(r.owner_name)} lent this item`:`${esc(r.owner_name)} borrowed this item`}</strong></div><div><small>Other person</small><strong>${esc(r.contact_name)}</strong></div><div><small>Quantity</small><strong>${r.quantity}</strong></div><div><small>Date</small><strong>${prettyDate(r.loan_date)}</strong></div>${r.due_date?`<div><small>Expected return</small><strong>${prettyDate(r.due_date)}</strong></div>`:''}</div>
   ${r.invitation_state==='PENDING'?`<p class="guest-question">1. Acknowledge the handover: ${r.direction==='LENT'?'did you take / borrow this item?':'did you give / lend this item?'}</p><div class="guest-buttons"><button id="accept-invite" class="btn btn-primary">${icon('check',18)} ${r.direction==='LENT'?'I took / borrowed this item':'I gave / lent this item'}</button><button id="decline-invite" class="btn btn-secondary">No, decline</button></div>`:`<div class="guest-confirmed">${icon('shield',20)} The item handover was acknowledged through this link. Return acknowledgment is separate; keep this link to complete it. Identity is not verified.</div>`}
@@ -312,7 +312,7 @@ async function guestPage(token){
   ${r.invitation_state==='ACCEPTED'?`<div class="guest-return"><h3>2. Return acknowledgment</h3><p>${r.outstanding_quantity===0?'All items returned. This loan is complete.':`${r.outstanding_quantity} of ${r.quantity} still outstanding`}</p>${r.pending_quantity?`<p>${r.pending_quantity} item(s) awaiting lender acknowledgment.</p>`:''}${r.outstanding_quantity > r.pending_quantity ?`<button id="guest-return" class="btn btn-secondary">${r.direction==='BORROWED'?'Acknowledge item returned':'Report item returned'}</button>`:''}${r.returns.filter(x=>x.status==='PENDING'&&r.direction==='BORROWED').map(x=>`<div class="return-row"><div><strong>${x.quantity} item(s)</strong><span>Borrower requested return confirmation</span></div><button data-guest-confirm="${x.id}" class="btn btn-small">Acknowledge return</button></div>`).join('')}</div>`:''}
   <p class="fine-print">Want to track your own loans? <a href="/signup">Create a free Udhaar account</a> (optional). You can complete this acknowledgment and returns without registering.</p><div class="guest-disclaimer">Anyone holding this link can view this loan and act as the other person for acknowledgment and returns. The sender is responsible for sharing it with the right person. Expires ${prettyDate(r.link_expires_at.slice(0,10))}.</div></div><div class="guest-footer">Udhaar — lend it, track it, get it back.</div></div>`;
   $('#accept-invite')?.addEventListener('click',async()=>{try{await send(`/api/share/${token}/respond`,{accept:true});toast('Record acknowledged.');load()}catch(err){toast(err.message)}});
-  $('#decline-invite')?.addEventListener('click',async()=>{try{await send(`/api/share/${token}/respond`,{accept:false});wrap.innerHTML='<div class="guest-wrap"><div class="guest-card"><div class="brand center">udhaar.</div><h2>Acknowledgment declined</h2><p>The record owner can see that you declined. No return or agreement was recorded.</p></div></div>'}catch(err){toast(err.message)}});
+  $('#decline-invite')?.addEventListener('click',async()=>{try{await send(`/api/share/${token}/respond`,{accept:false});wrap.innerHTML='<div class="guest-wrap"><div class="guest-card"><div class="brand center"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div><h2>Acknowledgment declined</h2><p>The record owner can see that you declined. No return or agreement was recorded.</p></div></div>'}catch(err){toast(err.message)}});
   $('#guest-return')?.addEventListener('click',()=>{
     const av=r.outstanding_quantity-r.pending_quantity;
     const el=modal(`<div class="modal-eyebrow">SHARED RETURN TRACKING</div><h2>${r.direction==='BORROWED'?'Acknowledge return':'Report a return'}</h2><form id="guest-return-form"><label class="field">How many returned?<input name="quantity" type="number" min="1" max="${av}" value="${av}" required /></label><p class="privacy-hint">${r.direction==='BORROWED'?'You are the lender. This acknowledges that the item was returned to you.':'The lender must acknowledge receipt before this return is complete.'}</p><button type="submit" class="btn btn-primary full">Save</button><p class="form-error" id="guest-return-error"></p></form>`);
