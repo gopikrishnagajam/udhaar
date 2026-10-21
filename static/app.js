@@ -10,6 +10,43 @@ const otpCooldowns = new Map();
 let authSubmitting = false;
 let verifyRetryUntil = 0;
 let inbox = [], inboxPolling = false;
+let closeNavigation = null, dialogNumber = 0;
+const mobileNavigation = window.matchMedia('(max-width:900px)');
+
+// Keep one scroll surface while an overlay is open, including with a phone keyboard.
+function activateOverlay(container, background, dismiss) {
+ const previousFocus=document.activeElement, scrollY=window.scrollY;
+ const bodyStyle=document.body.getAttribute('style');
+ const inertStates=background.map(el=>[el,el.inert]);
+ background.forEach(el=>el.inert=true);
+ Object.assign(document.body.style,{position:'fixed',top:`-${scrollY}px`,width:'100%',overflow:'hidden'});
+ const viewport=window.visualViewport;
+ const resize=()=>{
+  container.style.setProperty('--overlay-height',`${viewport?.height||window.innerHeight}px`);
+  container.style.setProperty('--overlay-top',`${viewport?.offsetTop||0}px`);
+  const focused=document.activeElement;
+  if(container.contains(focused)&&focused.matches('input,textarea,select')) focused.scrollIntoView({block:'nearest'});
+ };
+ const keydown=e=>{
+  if(e.key==='Escape'){e.preventDefault();dismiss();return}
+  if(e.key!=='Tab')return;
+  const controls=$$('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]',container).filter(el=>el.getClientRects().length);
+  const first=controls[0], last=controls.at(-1);
+  if(!first){e.preventDefault();return}
+  if(e.shiftKey&&(document.activeElement===first||!controls.includes(document.activeElement))){e.preventDefault();last.focus()}
+  else if(!e.shiftKey&&(document.activeElement===last||!controls.includes(document.activeElement))){e.preventDefault();first.focus()}
+ };
+ resize();viewport?.addEventListener('resize',resize);viewport?.addEventListener('scroll',resize);
+ window.addEventListener('resize',resize);document.addEventListener('keydown',keydown);
+ return ()=>{
+  viewport?.removeEventListener('resize',resize);viewport?.removeEventListener('scroll',resize);
+  window.removeEventListener('resize',resize);document.removeEventListener('keydown',keydown);
+  inertStates.forEach(([el,inert])=>el.inert=inert);
+  if(bodyStyle===null)document.body.removeAttribute('style');else document.body.setAttribute('style',bodyStyle);
+  window.scrollTo(0,scrollY);
+  if(previousFocus?.isConnected)previousFocus.focus({preventScroll:true});
+ };
+}
 
 function updateOtpControls() {
  const form=$('#otp-form');if(!form)return;
@@ -45,6 +82,8 @@ async function readApiResponse(resp) {
   return body;
 }
 function clearSignedInState() {
+  closeNavigation?.();
+  mobileNavigation.onchange=null;
   inbox=[];
   authConfig.has_session=false;user=null;records=[];activeRecord=null;shareLink='';tab='ALL';otpSent=false;authName='';notice='';
   $$('.modal-backdrop, .toast').forEach(el=>el.remove());
@@ -122,7 +161,7 @@ function authScreen(message='', recovery=null) {
  if(authConfig.provider==='supabase') {supabaseAuthScreen(message,recovery);return;}
  $('#app').innerHTML = `<div class="auth-wrap">
  <section class="auth-intro"><div class="brand brand-light"><img class="brand-wordmark" src="/static/branding/logo-ledger.png" alt="Udhaar" width="240" height="80" /></div>
- <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>That book you borrowed. The charger you lent. The things you meant to get back. All in one calm place.</p></div>
+ <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things <br>are worth <br><em>remembering.</em></h1><p>That book you borrowed. The charger you lent. The things you meant to get back. All in one calm place.</p></div>
  <div class="auth-foot">✦ Less remembering. More living.</div></section>
  <section class="auth-panel"><div class="auth-box"><div class="auth-chip">${icon('shield',14)} Private by default</div><h2>${signup?'Make yourself at home.':'Welcome back.'}</h2><p>${signup?'Start keeping track of the things that matter.':'Your lending and borrowing, all accounted for.'}</p>
  <form id="auth-form">${signup?'<label>Your name<input name="name" required maxlength="100" placeholder="e.g. Alex" autocomplete="name" /></label>':''}
@@ -137,7 +176,7 @@ function authScreen(message='', recovery=null) {
 function supabaseAuthScreen(message='', recovery=null) {
  $('#app').innerHTML=`<div class="auth-wrap">
  <section class="auth-intro"><div class="brand brand-light"><img class="brand-wordmark" src="/static/branding/logo-ledger.png" alt="Udhaar" width="240" height="80" /></div>
- <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things<br>are worth<br><em>remembering.</em></h1><p>A simple place for the things you lend and borrow.</p></div></section>
+ <div class="auth-intro-copy"><div class="eyebrow light-eyebrow">THE LITTLE THINGS MATTER</div><h1>Good things <br>are worth <br><em>remembering.</em></h1><p>A simple place for the things you lend and borrow.</p></div></section>
  <section class="auth-panel"><div class="auth-box"><div class="auth-chip">${icon('shield',14)} Sign in with an email code</div>
  <h2>${otpSent?'Check your inbox.':signup?'Make yourself at home.':'Welcome back.'}</h2>
  <p>${otpSent?`Enter the sign-in code sent to ${esc(authEmail)}.`:'We will email you a one-time code. No password needed.'}</p>
@@ -169,7 +208,9 @@ function supabaseAuthScreen(message='', recovery=null) {
  };
 }
 function topLayout(content) {
+ closeNavigation?.();
  $('#app').innerHTML=`<div class="layout"><aside class="sidebar" id="sidebar">
+   <button class="close-navigation" aria-label="Close navigation">${icon('close',21)}</button>
    <div class="brand"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div>
    <div class="sidebar-caption">MY WORKSPACE</div><nav class="nav">
    <button data-tab="ALL" class="nav-link ${tab==='ALL'?'active':''}">${icon('grid',19)} Overview</button>
@@ -178,11 +219,34 @@ function topLayout(content) {
    <button data-tab="INBOX" class="nav-link ${tab==='INBOX'?'active':''}">${icon('check',19)} Acknowledgments <span class="nav-count" id="inbox-count">${inbox.filter(r=>r.invitation_state==='PENDING').length}</span></button>
    </nav><button id="invite-friends" class="btn btn-secondary">${icon('link',17)} Invite friends</button><div class="sidebar-spacer"></div><div class="sidebar-tip">${icon('spark',19)}<strong>Just a little reminder</strong><p>A record today saves an awkward conversation tomorrow.</p></div>
    <div class="sidebar-user"><span class="avatar">${esc((user.name||'U').slice(0,1).toUpperCase())}</span><span class="sidebar-username"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small></span><button title="Sign out" aria-label="Sign out" id="logout">${icon('logout',19)}</button></div>
- </aside><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
+ </aside><div class="navigation-backdrop" hidden></div><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" aria-controls="sidebar" aria-expanded="false" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
  $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render()});
- $('#invite-friends').onclick=()=>showSignupShare();
+ $('#invite-friends').onclick=()=>{closeNavigation?.();showSignupShare()};
  $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});clearSignedInState();authScreen()}catch(err){toast(err.message)}};
- $('#toggle-nav')?.addEventListener('click',()=>$('#sidebar').classList.toggle('sidebar-open'));
+ const sidebar=$('#sidebar'), toggle=$('#toggle-nav'), backdrop=$('.navigation-backdrop');
+ const mobile=mobileNavigation;
+ const syncNavigation=()=>{if(!mobile.matches)closeNavigation?.();sidebar.inert=mobile.matches&&!closeNavigation};
+ // Assigning onchange releases the old layout's handler when the page is rendered again.
+ mobile.onchange=syncNavigation;
+ toggle.onclick=()=>{
+  if(closeNavigation){closeNavigation();return}
+  sidebar.inert=false;sidebar.classList.add('sidebar-open');backdrop.hidden=false;
+  sidebar.setAttribute('role','dialog');sidebar.setAttribute('aria-modal','true');sidebar.setAttribute('aria-label','Navigation');
+  toggle.setAttribute('aria-expanded','true');
+  const restore=activateOverlay(sidebar,[$('.main'),$('.site-footer')].filter(Boolean),()=>closeNavigation?.());
+  const onResize=()=>{if(!mobile.matches)closeNavigation?.()};
+  window.addEventListener('resize',onResize);
+  closeNavigation=()=>{
+   closeNavigation=null;restore();window.removeEventListener('resize',onResize);
+   sidebar.classList.remove('sidebar-open');backdrop.hidden=true;toggle.setAttribute('aria-expanded','false');
+   sidebar.removeAttribute('role');sidebar.removeAttribute('aria-modal');sidebar.removeAttribute('aria-label');
+   sidebar.inert=mobile.matches;
+  };
+  $('.close-navigation').focus({preventScroll:true});
+ };
+ $('.close-navigation').onclick=()=>closeNavigation?.();
+ backdrop.onclick=()=>closeNavigation?.();
+ syncNavigation();
 }
 function dashboard() {
  const lent=records.filter(r=>r.direction==='LENT'&&r.outstanding_quantity>0);
@@ -234,8 +298,15 @@ async function openInbox(id) {
  $$('[data-inbox-confirm]',el).forEach(b=>b.onclick=()=>action(`/returns/${b.dataset.inboxConfirm}/confirm`,{}));
 }
 function modal(html) {
- const el=document.createElement('div'); el.className='modal-backdrop'; el.innerHTML=`<div class="modal" role="dialog" aria-modal="true"><button class="close-modal" aria-label="Close">${icon('close',21)}</button>${html}</div>`;
- document.body.appendChild(el);el.addEventListener('click',e=>{if(e.target===el)el.remove()});$('.close-modal',el).onclick=()=>el.remove();document.addEventListener('keydown',function escape(e){if(e.key==='Escape'){el.remove();document.removeEventListener('keydown',escape)}},{once:true});return el;
+ closeNavigation?.();
+ const el=document.createElement('div'); el.className='modal-backdrop'; el.innerHTML=`<div class="modal" role="dialog" aria-modal="true"><div class="modal-toolbar"><button class="close-modal" aria-label="Close">${icon('close',21)}<span>Close</span></button></div><div class="modal-content">${html}</div></div>`;
+ const heading=$('h2',el);if(heading){heading.id=`dialog-title-${++dialogNumber}`;heading.tabIndex=-1;$('.modal',el).setAttribute('aria-labelledby',heading.id)}
+ document.body.appendChild(el);
+ const restore=activateOverlay(el,[$('#app'),$('.site-footer')].filter(Boolean),()=>el.remove());
+ const remove=el.remove.bind(el);let removed=false;
+ el.remove=()=>{if(removed)return;removed=true;remove();restore()};
+ el.addEventListener('click',e=>{if(e.target===el)el.remove()});$('.close-modal',el).onclick=()=>el.remove();
+ (heading||$('.close-modal',el)).focus({preventScroll:true});return el;
 }
 function openNew(){
  const el=modal(`<div class="modal-eyebrow">A LITTLE SOMETHING TO REMEMBER</div><h2>New lending record</h2><p>Start with the essentials. Everything else can wait.</p>
@@ -299,7 +370,7 @@ function openReturn(r, prefix=`/api/records/${r.id}`, reopen=()=>openDetails(r.i
  $('#return-form',el).onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',el);btn.disabled=true;try{const response=await send(`${prefix}/returns`,{quantity:Number(new FormData(e.target).get('quantity'))});el.remove();await loadRecords();toast(response.status==='PENDING'?'Return proposed. Awaiting the lender.':'Return saved.');reopen();}catch(err){$('#return-error',el).textContent=err.message}finally{btn.disabled=false}};
 }
 async function loadRecords(){const loaded=await Promise.all([api('/api/records'),api('/api/inbox')]);if(!user)return;[records,inbox]=loaded;render()}
-setInterval(async()=>{if(!user||document.hidden||inboxPolling)return;inboxPolling=true;try{const loaded=await api('/api/inbox');if(!user)return;inbox=loaded;const count=$('#inbox-count');if(count)count.textContent=inbox.filter(r=>r.invitation_state==='PENDING').length;if(tab==='INBOX'&&!$('.modal-backdrop'))inboxDashboard()}catch{}finally{inboxPolling=false}},30000);
+setInterval(async()=>{if(!user||document.hidden||inboxPolling)return;inboxPolling=true;try{const loaded=await api('/api/inbox');if(!user)return;inbox=loaded;const count=$('#inbox-count');if(count)count.textContent=inbox.filter(r=>r.invitation_state==='PENDING').length;if(tab==='INBOX'&&!$('.modal-backdrop')&&!closeNavigation)inboxDashboard()}catch{}finally{inboxPolling=false}},30000);
 async function guestPage(token){
  const wrap = $('#app');
  async function load(){

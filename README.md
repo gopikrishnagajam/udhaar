@@ -106,11 +106,14 @@ setup, credentials, connection pooling, and the Hobby plan's use limits.
 docker compose -f compose.yaml --profile test run --build --rm tests
 npm ci --prefix tests/browser
 npm run test:invitations --prefix tests/browser
+npm run test:mobile --prefix tests/browser
 ```
 
 API tests use temporary SQLite databases or isolated PostgreSQL schemas when
 `TEST_DATABASE_URL` is provided. Browser invitation tests start a disposable local
 server. Test email delivery and provider Auth calls are simulated.
+Mobile browser checks also use a disposable server and cover phone, tablet,
+desktop, and landscape layouts, dialogs, navigation, and acknowledgment flows.
 Session browser checks use an already running Supabase-mode app:
 
 ```powershell

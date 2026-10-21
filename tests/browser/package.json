@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "test": "node sessions.cjs",
-    "test:invitations": "node invitations.cjs"
+    "test:invitations": "node invitations.cjs",
+    "test:mobile": "node mobile.cjs"
   },
   "devDependencies": {
     "playwright-core": "1.64.1"
