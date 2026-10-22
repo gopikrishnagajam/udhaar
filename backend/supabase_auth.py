@@ -271,8 +271,12 @@ def make_router(get_db, csrf_dependency):
         # Bound account-existence checks too, without consuming an email cooldown
         # for a rejected duplicate signup. The user can immediately choose sign-in.
         limit_attempts(request, body.email, 'request')
-        if body.signup and db.scalar(select(User.id).where(func.lower(User.email) == body.email)):
+        existing_user = db.scalar(select(User.id).where(func.lower(User.email) == body.email))
+        if body.signup and existing_user:
             raise HTTPException(409, 'An account with this email already exists. Sign in instead')
+        if not body.signup and not existing_user:
+            raise HTTPException(409, {'code': 'signup_required',
+                'message': 'Create your Udhaar account to continue with this email.'})
         limit_attempts(request, body.email, 'send')
         # Name is local-only. No loan information or profile metadata goes to Supabase.
         auth_request('POST', '/otp', {'email': body.email, 'create_user': body.signup})

@@ -127,6 +127,10 @@ is available at `/api/docs` and the schema at `/api/openapi.json`.
 
 ## Documentation
 
+Production testing feedback and the working order are tracked in
+[Production testing TODO](TODO.md), from easiest estimated work to hardest.
+Review and update that backlog before suggesting or implementing changes.
+
 | Guide | Covers |
 | --- | --- |
 | [Architecture and schema](docs/understanding-the-setup.md) | Components, ten app tables, permissions, and loan lifecycle |

@@ -272,7 +272,7 @@ def test_logout_outage_does_not_trigger_a_refresh_retry(remote):
 def test_email_delivery_failure_is_actionable_without_leaking_provider_details(remote, caplog):
     (owner, _, _), state = remote
     state['otp_failure'] = {'error_code': 'unexpected_failure', 'msg': 'Error sending confirmation email: SMTP password SECRET_SMTP_VALUE for private@example.com'}
-    response = post(owner, '/api/auth/otp', {'email': 'alex@example.com'})
+    response = post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True})
     assert response.status_code == 503
     assert 'SMTP settings' in response.json()['detail']
     assert 'upstream_status=500' in caplog.text
@@ -290,8 +290,8 @@ def test_unverified_identity_cannot_establish_a_session(remote):
 def test_otp_rate_limit_and_configuration_failure(remote, monkeypatch):
     (owner, _, _), state = remote
     for index in range(5):
-        assert post(owner, '/api/auth/otp', {'email': f'user{index}@example.com'}).status_code == 200
-    assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 429
+        assert post(owner, '/api/auth/otp', {'email': f'user{index}@example.com', 'signup': True}).status_code == 200
+    assert post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 429
     monkeypatch.delenv('SUPABASE_PUBLISHABLE_KEY')
     assert owner.get('/api/auth/config').json()['configured'] is False
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 503
@@ -309,16 +309,47 @@ def test_existing_signup_sends_no_email_and_does_not_block_signin(remote):
     assert signin(owner, signup=False).json()['id'] == original_id
 
 
-def test_email_cooldown_is_shared_between_forms_and_returns_actual_wait(remote):
+def test_unknown_signin_guides_signup_without_sending_or_consuming_email_cooldown(remote):
+    (owner, _, _), state = remote
+    response = post(owner, '/api/auth/otp', {'email': '  NEW@EXAMPLE.COM  '})
+    assert response.status_code == 409
+    assert response.json()['detail']['code'] == 'signup_required'
+    assert state['requests'] == []
+    assert owner.get('/api/me').status_code == 401
+    # Signup can immediately send and verification creates the app profile.
+    assert signin(owner, email='new@example.com', name='New user').json()['name'] == 'New user'
+    assert state['requests'][0][2] == {'email': 'new@example.com', 'create_user': True}
+
+
+def test_unknown_signin_checks_are_rate_limited(remote):
+    (owner, _, _), state = remote
+    for index in range(10):
+        assert post(owner, '/api/auth/otp', {'email': f'unknown{index}@example.com'}).status_code == 409
+    assert post(owner, '/api/auth/otp', {'email': 'another@example.com'}).status_code == 429
+    assert state['requests'] == []
+
+
+def test_unfinished_provider_signup_can_complete_through_signup_form(remote):
+    (owner, _, _), state = remote
+    state['users']['new@example.com'] = {'id': str(uuid4()), 'email': 'new@example.com',
+        'email_confirmed_at': '2026-10-22T00:00:00Z'}
+    subject = state['users']['new@example.com']['id']
+    assert post(owner, '/api/auth/otp', {'email': 'new@example.com'}).status_code == 409
+    signin(owner, email='new@example.com', name='Returning signup')
+    assert state['users']['new@example.com']['id'] == subject
+    assert owner.get('/api/me').json()['name'] == 'Returning signup'
+
+
+def test_pending_signup_email_cooldown_is_shared_between_clients_and_returns_actual_wait(remote):
     (owner, guest, _), state = remote
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 200
     state['clock'] += 10
-    blocked = post(guest, '/api/auth/otp', {'email': 'ALEX@example.com', 'signup': False})
+    blocked = post(guest, '/api/auth/otp', {'email': 'ALEX@example.com', 'signup': True})
     assert blocked.status_code == 429
     assert blocked.headers['retry-after'] == '50'
     assert len(state['requests']) == 1
     state['clock'] += 50
-    assert post(guest, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 200
+    assert post(guest, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 200
     assert len(state['requests']) == 2
 
 
@@ -359,7 +390,7 @@ def test_local_token_validation_rejects_forged_signatures(remote):
 def test_upstream_rate_limit_keeps_provider_retry_after(remote):
     (owner, _, _), state = remote
     state.update(otp_status=429, otp_headers={'Retry-After': '120'}, otp_failure={'error_code': 'over_email_send_rate_limit', 'msg': 'Email rate limit exceeded'})
-    result = post(owner, '/api/auth/otp', {'email': 'alex@example.com'})
+    result = post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True})
     assert result.status_code == 429
     assert result.headers['retry-after'] == '120'
     assert 'Supabase' in result.json()['detail']

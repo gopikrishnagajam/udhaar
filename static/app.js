@@ -73,9 +73,10 @@ async function requestOtpCode() {
 async function readApiResponse(resp) {
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const details = Array.isArray(body.detail) ? body.detail.map(d=>d.msg).join('; ') : body.detail;
+    const details = Array.isArray(body.detail) ? body.detail.map(d=>d.msg).join('; ') : body.detail?.message || body.detail;
     const error=new Error(typeof details === 'string' ? details : `Request failed (${resp.status})`);
     error.status=resp.status;
+    error.code=body.detail?.code;
     error.retryAfter=Number(resp.headers.get('Retry-After'))||0;
     throw error;
   }
@@ -186,7 +187,7 @@ function supabaseAuthScreen(message='', recovery=null) {
  ${recovery?'<button id="retry-session" class="btn btn-secondary full">Retry session</button>':''}
  <div class="auth-switch">${otpSent?'<button id="change-email">Change email</button> <button id="resend-code" disabled>Resend code</button> ':''}<span>${signup?'Already have an account?':'New to Udhaar?'}</span> <button id="switch-auth">${signup?'Sign in':'Create an account'}</button></div>
  <div class="auth-note">Your personal records stay private from other users unless you share them. Read our <a href="/privacy">Privacy notice</a> and <a href="/terms">Terms</a>.</div></div></section></div>`;
- $('#switch-auth')?.addEventListener('click',()=>{if(authSubmitting)return;signup=!signup;otpSent=false;authScreen()});
+ $('#switch-auth')?.addEventListener('click',()=>{if(authSubmitting)return;authEmail=$('input[name=email]')?.value.trim().toLowerCase()||authEmail;authName=$('input[name=name]')?.value.trim()||authName;signup=!signup;otpSent=false;history.replaceState(null,'',signup?'/signup':'/');authScreen()});
  $('#change-email')?.addEventListener('click',()=>{if(authSubmitting)return;otpSent=false;authScreen()});
  const retry=$('#retry-session');
  if(retry){
@@ -203,7 +204,8 @@ function supabaseAuthScreen(message='', recovery=null) {
  form.onsubmit=async e=>{e.preventDefault();updateOtpControls();if(authSubmitting||$('button[type=submit]',form).disabled)return;const data=Object.fromEntries(new FormData(e.target));authSubmitting=true;updateOtpControls();
   try{if(!otpSent){authEmail=data.email.trim().toLowerCase();authName=(data.name||'').trim();await requestOtpCode();otpSent=true;authScreen();}
    else{user=await send('/api/auth/verify',{email:authEmail,code:data.code.trim(),name:authName});authConfig.has_session=true;otpSent=false;await loadRecords();}}
-  catch(err){if(otpSent&&err.status===429)verifyRetryUntil=Date.now()+(err.retryAfter||60)*1000;$('#otp-error')?.replaceChildren(document.createTextNode(err.message));}
+  catch(err){if(!otpSent&&!signup&&err.code==='signup_required'){signup=true;history.replaceState(null,'','/signup');authScreen(err.message);$('input[name=name]')?.focus();}
+   else{if(otpSent&&err.status===429)verifyRetryUntil=Date.now()+(err.retryAfter||60)*1000;$('#otp-error')?.replaceChildren(document.createTextNode(err.message));}}
   finally{authSubmitting=false;updateOtpControls();}
  };
 }
