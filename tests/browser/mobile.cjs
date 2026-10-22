@@ -216,6 +216,7 @@ async function navigate(page, tab) {
   await recipient.evaluate(() => send('/api/register', {name:'Inbox recipient',email:'mobile-inbox@example.com',password:'StrongPass123!'}));
   await recipient.reload();
   await recipient.locator('#new-record').waitFor();
+  const emailCountBeforeInbox = (await (await fetch(base + '/__test/emails')).json()).length;
   await page.locator('#new-record').click();
   await page.locator('[name=item_name]').fill('Mobile inbox loan');
   await page.locator('[name=contact_name]').fill('Inbox recipient');
@@ -224,8 +225,29 @@ async function navigate(page, tab) {
   await page.locator('#record-form button[type=submit]').click();
   await page.locator('#share-action').waitFor();
   await closeDialog(page);
+  // A signed-in recipient sees incoming requests without reloading or opening the menu.
+  await recipient.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await recipient.locator('#shared-requests [data-invitation]').waitFor();
+  assert.equal((await (await fetch(base + '/__test/emails')).json()).length, emailCountBeforeInbox);
+  await fits(recipient, 'Received acknowledgment appears directly on the mobile dashboard');
+  await recipient.locator('#shared-requests [data-invitation]').click();
+  await recipient.locator('#inbox-accept').waitFor();
+  await closeDialog(recipient);
   await recipient.reload();
+  await recipient.locator('#shared-requests [data-invitation]').waitFor();
+  await navigate(recipient, 'OFF');
+  assert.equal(await recipient.locator('#shared-requests').count(), 0);
+  await navigate(recipient, 'ON');
+  await recipient.locator('#shared-requests [data-invitation]').waitFor();
+  // Sending another request after the dashboard loaded must be picked up on navigation.
+  await page.evaluate(() => send('/api/records', {direction:'BORROWED',mode:'ON',
+    contact_name:'Inbox recipient',contact_email:'mobile-inbox@example.com',item_name:'Fresh inbox loan',loan_date:'2026-10-22'}));
   await navigate(recipient, 'INBOX');
+  await recipient.locator('[data-invitation]').filter({hasText:'Fresh inbox loan'}).waitFor();
+  await recipient.locator('[data-invitation]').filter({hasText:'Fresh inbox loan'}).click();
+  await recipient.locator('#inbox-decline').click();
+  await recipient.locator('.modal-backdrop').waitFor({state:'detached'});
+  await recipient.locator('[data-invitation]').filter({hasText:'Fresh inbox loan'}).waitFor({state:'detached'});
   await fits(recipient, 'Mobile acknowledgment inbox');
   await recipient.locator('[data-invitation]').click();
   await dialogFits(recipient);
@@ -241,7 +263,8 @@ async function navigate(page, tab) {
   await page.getByText('All returned / completed', {exact:true}).waitFor();
   await closeDialog(page);
   await recipientContext.close();
-  results.push('Phone inbox supports handover acknowledgment and lender-confirmed returns');
+  results.push('Received requests appear on Overview and On the Record, refresh on focus/navigation, survive reload, and send no email');
+  results.push('Phone inbox supports decline, handover acknowledgment and lender-confirmed returns');
 
   // Test the hosted email-code layout without contacting an auth provider.
   const otp = await context.newPage();

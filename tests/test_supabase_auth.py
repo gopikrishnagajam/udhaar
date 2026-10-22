@@ -127,6 +127,30 @@ def test_profile_is_stable_on_repeat_signin_and_accounts_are_isolated(remote):
     assert guest.get('/api/records/' + record.json()['id']).status_code == 404
 
 
+@pytest.mark.parametrize('direction', ['LENT', 'BORROWED'])
+def test_existing_otp_recipient_receives_in_app_request_without_email(remote, mail, direction):
+    (owner, recipient, stranger), state = remote
+    signin(owner)
+    signin(recipient, 'recipient@example.com', 'Recipient')
+    signin(stranger, 'stranger@example.com', 'Stranger')
+    response = post(owner, '/api/records', {'direction': direction, 'mode': 'ON',
+        'contact_name': 'Recipient', 'contact_email': ' RECIPIENT@EXAMPLE.COM ',
+        'item_name': 'Shared book', 'quantity': 1, 'notes': 'Private owner note', 'loan_date': '2026-10-22'})
+    assert response.status_code == 201
+    assert response.json()['invitation_delivery'] == 'IN_APP'
+    assert mail == []
+    item, = recipient.get('/api/inbox').json()
+    assert item['item_name'] == 'Shared book'
+    assert 'notes' not in item and 'events' not in item
+    assert stranger.get('/api/inbox').json() == []
+    path = f"/api/inbox/{item['invitation_id']}"
+    assert stranger.get(path).status_code == 404
+    assert post(recipient, path + '/respond', {'accept': True}).status_code == 200
+    assert owner.get('/api/records/' + response.json()['id']).json()['acknowledgment'] == 'CONFIRMED'
+    assert recipient.get('/api/inbox').json()[0]['invitation_state'] == 'ACCEPTED'
+    assert mail == []
+
+
 def test_expired_access_refreshes_and_rotates_cookies(remote):
     (owner, _, _), state = remote
     signin(owner)

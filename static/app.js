@@ -222,7 +222,7 @@ function topLayout(content) {
    </nav><button id="invite-friends" class="btn btn-secondary">${icon('link',17)} Invite friends</button><div class="sidebar-spacer"></div><div class="sidebar-tip">${icon('spark',19)}<strong>Just a little reminder</strong><p>A record today saves an awkward conversation tomorrow.</p></div>
    <div class="sidebar-user"><span class="avatar">${esc((user.name||'U').slice(0,1).toUpperCase())}</span><span class="sidebar-username"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small></span><button title="Sign out" aria-label="Sign out" id="logout">${icon('logout',19)}</button></div>
  </aside><div class="navigation-backdrop" hidden></div><main class="main"><div class="mobilebar"><button aria-label="Toggle navigation" aria-controls="sidebar" aria-expanded="false" id="toggle-nav">${icon('menu')}</button><div class="brand"><span class="brand-mark"><img src="/static/branding/logo.png" alt="" width="36" height="36" /></span><span>udhaar<span class="brand-dot">.</span></span></div></div>${content}</main></div>`;
- $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render()});
+ $$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;activeRecord=null;render();if(tab==='INBOX')refreshInbox().catch(err=>toast(err.message))});
  $('#invite-friends').onclick=()=>{closeNavigation?.();showSignupShare()};
  $('#logout').onclick=async()=>{try{await send(authConfig.provider==='supabase'?'/api/auth/logout':'/api/logout',{});clearSignedInState();authScreen()}catch(err){toast(err.message)}};
  const sidebar=$('#sidebar'), toggle=$('#toggle-nav'), backdrop=$('.navigation-backdrop');
@@ -262,6 +262,7 @@ function dashboard() {
  <section class="summary-grid"><div class="metric"><span class="metric-icon mint">${icon('arrow',18)}</span><span class="metric-label">Currently lent out</span><strong>${lent.reduce((n,r)=>n+r.outstanding_quantity,0)}</strong><small>items waiting to come back</small></div>
  <div class="metric"><span class="metric-icon lavender">${icon('package',18)}</span><span class="metric-label">Currently borrowed</span><strong>${borrowed.reduce((n,r)=>n+r.outstanding_quantity,0)}</strong><small>items you're holding</small></div>
  <div class="metric"><span class="metric-icon peach">${icon('clock',18)}</span><span class="metric-label">Past due</span><strong>${overdue.length}</strong><small>records to follow up on</small></div></section>
+ ${tab==='ALL'||tab==='ON'?'<section class="records-section" id="shared-requests" aria-label="Shared with you"></section>':''}
  <section class="records-section"><div class="sectionhead"><div><div class="section-eyebrow">THE THINGS YOU'RE TRACKING</div><h2>${tab==='ALL'?'All records':labelMode(tab)} <span>${list.length}</span></h2></div><div class="search-wrap">${icon('search',17)}<input id="search" type="search" placeholder="Find an item or person…" autocomplete="off"/></div></div>
  <div class="filterbar"><button class="filter ${tab==='ALL'?'chosen':''}" data-filter="ALL">All records</button><button class="filter ${tab==='OFF'?'chosen':''}" data-filter="OFF">${icon('lock',14)} Off the Record</button><button class="filter ${tab==='ON'?'chosen':''}" data-filter="ON">${icon('users',14)} On the Record</button></div>
  <div class="record-list" id="record-list"></div></section>
@@ -279,13 +280,23 @@ function dashboard() {
  $('#search').oninput=e=>showList(e.target.value);
  $$('[data-filter]').forEach(b=>b.onclick=()=>{tab=b.dataset.filter;render()});
  $('#new-record').onclick=openNew;
+ renderSharedRequests();
 }
 function render(){ if (!user) authScreen();else if(tab==='INBOX') inboxDashboard();else dashboard();renderNotice() }
 
+function inboxCards() {
+ return inbox.map(r=>`<button class="record-card" data-invitation="${esc(r.invitation_id)}"><span class="item-icon">${icon('package',23)}</span><span class="record-main"><strong>${esc(r.item_name)}</strong><span>${esc(r.owner_name)} ${r.direction==='LENT'?'lent to you':'borrowed from you'} · ${r.quantity} item(s)</span></span>${ackBadge(r)}${icon('chevron',19)}</button>`).join('');
+}
+function renderSharedRequests() {
+ const section=$('#shared-requests');if(!section)return;
+ section.innerHTML=`<div class="sectionhead"><div><div class="section-eyebrow">ACKNOWLEDGMENTS</div><h2>Shared with you <span>${inbox.length}</span></h2></div><button id="refresh-shared" class="btn btn-secondary">Refresh</button></div><div class="record-list">${inboxCards()||'<div class="empty"><h3>No shared requests yet.</h3><p>Loans shared with your account will appear here for acknowledgment.</p></div>'}</div>`;
+ $$('[data-invitation]',section).forEach(b=>b.onclick=()=>openInbox(b.dataset.invitation));
+ $('#refresh-shared').onclick=()=>refreshInbox().catch(err=>toast(err.message));
+}
 function inboxDashboard() {
- topLayout(`<header class="pagehead"><div class="headerline"><div><h1>Your acknowledgments.</h1><p>Review loans shared with you and track their returns.</p></div><button id="refresh-inbox" class="btn btn-secondary">Refresh</button></div></header><section class="record-list">${inbox.length?inbox.map(r=>`<button class="record-card" data-invitation="${esc(r.invitation_id)}"><span class="item-icon">${icon('package',23)}</span><span class="record-main"><strong>${esc(r.item_name)}</strong><span>${esc(r.owner_name)} ${r.direction==='LENT'?'lent to you':'borrowed from you'} · ${r.quantity} item(s)</span></span>${ackBadge(r)}${icon('chevron',19)}</button>`).join(''):'<div class="empty"><h3>All caught up.</h3><p>Loans shared with your account will appear here.</p></div>'}</section>`);
+ topLayout(`<header class="pagehead"><div class="headerline"><div><h1>Your acknowledgments.</h1><p>Review loans shared with you and track their returns.</p></div><button id="refresh-inbox" class="btn btn-secondary">Refresh</button></div></header><section class="record-list">${inboxCards()||'<div class="empty"><h3>All caught up.</h3><p>Loans shared with your account will appear here.</p></div>'}</section>`);
  $$('[data-invitation]').forEach(b=>b.onclick=()=>openInbox(b.dataset.invitation));
- $('#refresh-inbox').onclick=async()=>{try{await loadRecords()}catch(err){toast(err.message)}};
+ $('#refresh-inbox').onclick=()=>refreshInbox().catch(err=>toast(err.message));
 }
 
 async function openInbox(id) {
@@ -372,7 +383,16 @@ function openReturn(r, prefix=`/api/records/${r.id}`, reopen=()=>openDetails(r.i
  $('#return-form',el).onsubmit=async e=>{e.preventDefault();const btn=$('button[type=submit]',el);btn.disabled=true;try{const response=await send(`${prefix}/returns`,{quantity:Number(new FormData(e.target).get('quantity'))});el.remove();await loadRecords();toast(response.status==='PENDING'?'Return proposed. Awaiting the lender.':'Return saved.');reopen();}catch(err){$('#return-error',el).textContent=err.message}finally{btn.disabled=false}};
 }
 async function loadRecords(){const loaded=await Promise.all([api('/api/records'),api('/api/inbox')]);if(!user)return;[records,inbox]=loaded;render()}
-setInterval(async()=>{if(!user||document.hidden||inboxPolling)return;inboxPolling=true;try{const loaded=await api('/api/inbox');if(!user)return;inbox=loaded;const count=$('#inbox-count');if(count)count.textContent=inbox.filter(r=>r.invitation_state==='PENDING').length;if(tab==='INBOX'&&!$('.modal-backdrop')&&!closeNavigation)inboxDashboard()}catch{}finally{inboxPolling=false}},30000);
+async function refreshInbox() {
+ if(!user||inboxPolling)return;
+ const userId=user.id;inboxPolling=true;
+ try{const loaded=await api('/api/inbox');if(user?.id!==userId)return;inbox=loaded;const count=$('#inbox-count');if(count)count.textContent=inbox.filter(r=>r.invitation_state==='PENDING').length;
+  if(tab==='INBOX'&&!$('.modal-backdrop')&&!closeNavigation)inboxDashboard();else renderSharedRequests();
+ }finally{inboxPolling=false}
+}
+setInterval(()=>{if(!document.hidden)refreshInbox().catch(()=>{})},30000);
+window.addEventListener('focus',()=>refreshInbox().catch(()=>{}));
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshInbox().catch(()=>{})});
 async function guestPage(token){
  const wrap = $('#app');
  async function load(){

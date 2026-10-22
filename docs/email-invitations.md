@@ -51,6 +51,10 @@ user, which is unnecessary for these invitations.
   email. The app checks its `users` profiles by email. Existing users receive an
   account-bound request in **Acknowledgments**, including both accept/decline and
   return handling. Other users and anonymous requests cannot access that inbox.
+- Received requests also appear under **Shared with you** on Overview and On the
+  Record, with direct access to acknowledge them. Opening Acknowledgments or
+  returning to the app refreshes received requests; visible pages also check every
+  30 seconds. Existing account holders receive no acknowledgment email.
 - A recipient with no app profile receives a private 30-day link by email. It
   supports handover acknowledgment and subsequent returns without signing in.
   Registration is optional in both the email and guest page. Guest actions are
