@@ -53,3 +53,13 @@ def test_privacy_notice_describes_current_manual_controls_and_bearer_links(setup
         assert disclosure in text
     assert 'Do not post your email address' in response.text
     assert 'href="/license"' in guest.get('/rights').text
+
+
+def test_static_assets_are_cacheable_and_optimized(setup):
+    _, guest, _ = setup
+    for asset in ('/static/app.js', '/static/style.css', '/static/branding/logo.png', '/static/branding/logo-ledger.png'):
+        response = guest.get(asset)
+        assert response.status_code == 200
+        assert response.headers['cache-control'] == 'public, max-age=86400'
+    assert (ROOT / 'static' / 'branding' / 'logo.png').stat().st_size < 50_000
+    assert (ROOT / 'static' / 'branding' / 'logo-ledger.png').stat().st_size < 100_000

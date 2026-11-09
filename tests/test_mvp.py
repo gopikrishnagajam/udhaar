@@ -171,3 +171,58 @@ def test_handover_and_return_acknowledgments_are_separate(setup, direction):
         assert state()['return_acknowledgment'] == ('PARTIAL' if index == 0 else 'CONFIRMED')
         assert state()['settlement'] == ('PARTIAL' if index == 0 else 'RETURNED')
         assert state()['handover_acknowledgment'] == 'CONFIRMED'
+
+
+def test_records_and_inbox_avoid_n_plus_one_queries_and_update_contact_email(setup):
+    from sqlalchemy import event
+    from backend.main import app, get_db
+
+    owner, recipient, _ = setup
+    account(owner, 'Alex', 'alex@example.com')
+    account(recipient, 'Rahul', 'rahul@example.com')
+
+    off_rec = post(owner, '/api/records', {
+        'direction': 'LENT', 'mode': 'OFF', 'contact_name': 'Priya',
+        'item_name': 'Camera Tripod', 'category': 'Equipment',
+        'quantity': 1, 'loan_date': '2026-10-15',
+    }).json()
+    assert off_rec['contact_email'] is None
+    assert post(owner, f"/api/records/{off_rec['id']}/share", {'email': 'priya@example.com'}).status_code == 200
+    assert owner.get(f"/api/records/{off_rec['id']}").json()['contact_email'] == 'priya@example.com'
+
+    for idx in range(5):
+        rec = post(owner, '/api/records', {
+            'direction': 'LENT', 'mode': 'ON', 'contact_name': 'Rahul',
+            'contact_email': 'rahul@example.com', 'item_name': f'Item {idx}',
+            'category': 'Tools', 'quantity': 2, 'loan_date': '2026-10-15',
+        }).json()
+        assert rec['invitation_delivery'] == 'IN_APP'
+
+    db_gen = app.dependency_overrides[get_db]()
+    session = next(db_gen)
+    bind = session.get_bind()
+    session.close()
+
+    statements = []
+
+    def record_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(bind, 'before_cursor_execute', record_sql)
+    try:
+        statements.clear()
+        records_resp = owner.get('/api/records')
+        assert records_resp.status_code == 200
+        assert len(records_resp.json()) == 6
+        # Auth lookup + bounded eager-loaded queries (never 1 + 3*N).
+        assert len(statements) <= 5
+
+        statements.clear()
+        inbox_resp = recipient.get('/api/inbox')
+        assert inbox_resp.status_code == 200
+        assert len(inbox_resp.json()) == 5
+        # Auth lookup + invitations + batch records/returns + batch owners (never 1 + 6*M, never record_events).
+        assert len(statements) <= 6
+        assert not any('record_events' in sql.lower() for sql in statements)
+    finally:
+        event.remove(bind, 'before_cursor_execute', record_sql)

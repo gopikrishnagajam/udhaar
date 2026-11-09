@@ -442,3 +442,34 @@ def test_anonymous_loan_link_still_supports_both_acknowledgments(remote, mail):
     result = guest.get('/api' + path).json()
     assert result['handover_acknowledgment'] == 'CONFIRMED'
     assert result['return_acknowledgment'] == 'CONFIRMED'
+
+
+def test_vercel_forwarded_ip_isolates_rate_limits_and_inline_user_skips_extra_fetch(remote, monkeypatch):
+    (owner, guest, _), state = remote
+    monkeypatch.setenv('VERCEL', '1')
+    for idx in range(5):
+        resp = owner.post(
+            '/api/auth/otp',
+            json={'email': f'ip1-user{idx}@example.com', 'signup': True},
+            headers={'X-CSRF-Token': owner.cookies.get('udhaar_csrf', ''), 'X-Forwarded-For': '203.0.113.10, 10.0.0.1'},
+        )
+        assert resp.status_code == 200
+    blocked = owner.post(
+        '/api/auth/otp',
+        json={'email': 'ip1-extra@example.com', 'signup': True},
+        headers={'X-CSRF-Token': owner.cookies.get('udhaar_csrf', ''), 'X-Forwarded-For': '203.0.113.10'},
+    )
+    assert blocked.status_code == 429
+    allowed_other_ip = guest.post(
+        '/api/auth/otp',
+        json={'email': 'ip2-user@example.com', 'signup': True},
+        headers={'X-CSRF-Token': guest.cookies.get('udhaar_csrf', ''), 'X-Forwarded-For': '198.51.100.22'},
+    )
+    assert allowed_other_ip.status_code == 200
+
+    # When session response already includes the verified user payload, /user is not called.
+    user_obj = {'id': str(uuid4()), 'email': 'ip2-user@example.com', 'email_confirmed_at': '2026-10-22T00:00:00Z', 'is_anonymous': False}
+    access = state['mint'](user_obj)
+    subject, email = auth.verified_identity(access, user_obj)
+    assert subject == user_obj['id']
+    assert email == 'ip2-user@example.com'

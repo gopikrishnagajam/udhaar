@@ -14,10 +14,11 @@ import httpx
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from . import email_delivery
 from .models import AuthIdentity, User
 
 ACCESS_COOKIE = 'udhaar_sb_access'
@@ -26,6 +27,8 @@ _attempts = OrderedDict()
 _attempts_lock = Lock()
 logger = logging.getLogger('uvicorn.error')
 _clock = time.monotonic
+_ORIGINAL_HTTPX_CLIENT = httpx.Client
+_http_client = httpx.Client(follow_redirects=False)
 
 
 @lru_cache(maxsize=4)
@@ -86,8 +89,11 @@ def auth_request(method, path, payload=None, token=None):
         headers['Authorization'] = 'Bearer ' + token
     try:
         timeout = httpx.Timeout(30 if path == '/otp' else 10, connect=5)
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            result = client.request(method, url + '/auth/v1' + path, json=payload, headers=headers)
+        if httpx.Client is _ORIGINAL_HTTPX_CLIENT:
+            result = _http_client.request(method, url + '/auth/v1' + path, json=payload, headers=headers, timeout=timeout)
+        else:
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                result = client.request(method, url + '/auth/v1' + path, json=payload, headers=headers)
     except httpx.RequestError as exc:
         # Never log exception text: it may include URLs, headers or credentials.
         logger.warning('Supabase auth request failed: endpoint=%s transport=%s', path.split('?')[0], type(exc).__name__)
@@ -129,13 +135,20 @@ def auth_request(method, path, payload=None, token=None):
         raise HTTPException(503, 'Invalid authentication service response') from None
 
 
-def verified_identity(access_token):
-    """Supabase /user verifies the access token. Never trust a decoded JWT alone."""
-    data = auth_request('GET', '/user', token=access_token)
+def verified_identity(access_token, user_data=None):
+    """Verify identity via signed JWT + session user payload or /user fallback."""
+    if isinstance(user_data, dict):
+        jwt_sub = token_subject(access_token)
+        data = user_data
+    else:
+        jwt_sub = None
+        data = auth_request('GET', '/user', token=access_token)
     try:
         subject = str(UUID(data['id']))
-        email = data['email'].strip().casefold()
-        if not email or '@' not in email or len(email) > 255 or not data.get('email_confirmed_at') or data.get('is_anonymous'):
+        if jwt_sub is not None and subject != jwt_sub:
+            raise ValueError()
+        email = email_delivery.normalize_email(data['email'])
+        if not data.get('email_confirmed_at') or data.get('is_anonymous'):
             raise ValueError()
     except (ValueError, TypeError, KeyError, AttributeError):
         raise HTTPException(401, 'A verified email account is required') from None
@@ -204,10 +217,24 @@ def clear_session(response):
     response.delete_cookie('udhaar_session', path='/')
 
 
+def client_ip(request: Request) -> str:
+    """Extract client IP safely on Vercel without trusting spoofed headers locally."""
+    if os.getenv('VERCEL') == '1':
+        forwarded = request.headers.get('x-forwarded-for', '')
+        if forwarded:
+            first = forwarded.split(',')[0].strip()
+            if first:
+                return first
+        real_ip = request.headers.get('x-real-ip', '').strip()
+        if real_ip:
+            return real_ip
+    return request.client.host if request.client else 'unknown'
+
+
 def limit_attempts(request, email, action):
     """Bounded, process-local protection for the local beta, not a distributed limiter."""
     clock = _clock()
-    keys = [(action, 'ip', request.client.host if request.client else 'unknown'), (action, 'email', email)]
+    keys = [(action, 'ip', client_ip(request)), (action, 'email', email)]
     with _attempts_lock:
         for key in keys:
             attempts = [t for t in _attempts.get(key, []) if clock - t < 60]
@@ -231,10 +258,7 @@ class EmailBody(BaseModel):
     @field_validator('email')
     @classmethod
     def email_address(cls, value):
-        value = value.strip().casefold()
-        if value.count('@') != 1 or not all(value.split('@')) or any(c.isspace() for c in value):
-            raise ValueError('Enter a valid email address')
-        return value
+        return email_delivery.normalize_email(value)
 
 
 class OtpRequest(EmailBody):
@@ -271,7 +295,7 @@ def make_router(get_db, csrf_dependency):
         # Bound account-existence checks too, without consuming an email cooldown
         # for a rejected duplicate signup. The user can immediately choose sign-in.
         limit_attempts(request, body.email, 'request')
-        existing_user = db.scalar(select(User.id).where(func.lower(User.email) == body.email))
+        existing_user = db.scalar(select(User.id).where(User.email == body.email))
         if body.signup and existing_user:
             raise HTTPException(409, 'An account with this email already exists. Sign in instead')
         if not body.signup and not existing_user:
@@ -289,7 +313,7 @@ def make_router(get_db, csrf_dependency):
         access = session.get('access_token')
         if not isinstance(access, str) or not access:
             raise HTTPException(503, 'Invalid authentication session response')
-        subject, email = verified_identity(access)
+        subject, email = verified_identity(access, session.get('user'))
         if email != body.email:
             raise HTTPException(401, 'Verified account does not match the requested email')
         set_session(response, session)
@@ -305,7 +329,7 @@ def make_router(get_db, csrf_dependency):
         access = session.get('access_token')
         if not isinstance(access, str) or not access:
             raise HTTPException(503, 'Invalid authentication session response')
-        subject, _ = verified_identity(access)
+        subject, _ = verified_identity(access, session.get('user'))
         if not find_user(db, subject):
             raise HTTPException(401, 'Local account not found; sign in again')
         set_session(response, session)
