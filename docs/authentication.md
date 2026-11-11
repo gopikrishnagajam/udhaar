@@ -42,7 +42,10 @@ Hosted cookies use `Secure` and SameSite=Lax. Tokens are not returned to fronten
 JavaScript or stored in web storage. Normal protected requests verify JWT
 signature and issuer/audience/expiry/subject/role claims using cached Supabase
 public keys. ES256 and RS256 are supported; unsigned and HS256 tokens are rejected.
-Verification and refresh also validate provider user information over HTTPS.
+Verification and refresh use provider user information returned over HTTPS;
+the backend requests `/user` only if the token response omits that information.
+Normal protected requests resolve the issuer/subject mapping and local profile
+in a single joined database query, without an additional provider `/user` call.
 
 On a protected API 401, the frontend attempts a single refresh and retries once.
 Parallel requests in one tab share the refresh promise. A permanent refresh

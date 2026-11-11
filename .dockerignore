@@ -11,5 +11,4 @@ __pycache__
 *.sqlite3
 *.sqlite3-*
 *.db
-docs/previews
 .vscode

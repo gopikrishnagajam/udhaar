@@ -115,7 +115,8 @@ law and explain the scope and timing of an individual request.
 - Public testing uses Vercel Hobby; personal/non-commercial and usage restrictions
   still apply. Supabase and Resend have separate quotas and availability limits.
 - FastAPI's OTP limiter is process-local; Supabase's provider limits still apply.
-  A distributed limiter and trusted proxy/client-IP handling are future work.
+  Vercel client-IP forwarding is handled explicitly; a distributed limiter and
+  review of proxy trust remain future work.
 - The database runtime uses table-owner credentials. A restricted runtime role
   and separately scoped migration credentials remain a hardening step.
 - Invitation/recipient flows lock shared records, but broad concurrent-return and

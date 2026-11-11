@@ -20,10 +20,11 @@ The backend tracks rolling 60-second windows:
 - OTP request/precheck and verification attempts: ten per email/IP action window.
 - Entries are bounded to avoid unlimited process memory growth.
 
-The backend currently uses the connecting client address without forwarding a
-browser-supplied IP header to Supabase. Proxy/shared addresses can aggregate
-users. This process-local guard is a small-test deployment measure; a global
-distributed limiter and trusted proxy configuration remain operational work.
+On Vercel, the backend resolves the client address from `X-Forwarded-For`, then
+`X-Real-IP`, falling back to the connecting address. Outside Vercel it uses the
+connecting address and ignores forwarded headers. It does not forward a client
+IP header to Supabase. Shared addresses can still aggregate users. These guards
+are process-local; a distributed limiter and review of proxy trust remain work.
 
 ## Provider limits and errors
 

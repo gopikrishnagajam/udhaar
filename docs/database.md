@@ -42,7 +42,7 @@ FROM udhaar.invitations ORDER BY created_at DESC LIMIT 100;
 ```
 
 There are ten app tables plus `alembic_version`; see the
-[schema diagram](understanding-the-setup.md#tables). Supabase Auth sessions are
+[schema diagram](architecture.md#tables). Supabase Auth sessions are
 in `auth.sessions`, not the local-mode `udhaar.login_sessions` table.
 Dashboard SQL normally has elevated access; a successful admin query does not
 establish what an app user is allowed to see.

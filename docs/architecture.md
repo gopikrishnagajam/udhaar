@@ -1,5 +1,9 @@
 # Architecture and database schema
 
+This describes the implemented item-record system. Broader ledger and paid-rental
+capabilities are defined in [Product direction](product-direction.md) and tracked
+in the [roadmap](roadmap.md); they are not part of the current schema.
+
 ## Components
 
 ```mermaid
@@ -62,7 +66,7 @@ so sharing to a new address does not reassign other loans to a different person.
 
 `auth_identities.subject` contains the Supabase user ID but has no database foreign
 key to `auth.users`. Hosted sessions live in `auth.sessions`, while the browser
-receives HTTP-only access/refresh cookies. See the [Auth guide](supabase-implementation.md).
+receives HTTP-only access/refresh cookies. See the [Auth guide](authentication.md).
 
 ## Loan lifecycle
 
@@ -100,7 +104,7 @@ automatically attach the old request to the new account.
 
 These rules provide application access controls, not end-to-end encryption or
 operator-blind storage. See the [Privacy notice](../PRIVACY.md) and
-[database guide](supabase-database.md).
+[database guide](database.md).
 
 ## Source map
 

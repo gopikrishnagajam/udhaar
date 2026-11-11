@@ -157,8 +157,12 @@ def verified_identity(access_token, user_data=None):
 
 def find_user(db, subject):
     url, _ = settings()
-    identity = db.scalar(select(AuthIdentity).where(AuthIdentity.issuer == url + '/auth/v1', AuthIdentity.subject == subject))
-    return db.get(User, identity.user_id) if identity else None
+    # Resolve the profile in one round trip on every authenticated request.
+    return db.scalar(
+        select(User)
+        .join(AuthIdentity, AuthIdentity.user_id == User.id)
+        .where(AuthIdentity.issuer == url + '/auth/v1', AuthIdentity.subject == subject)
+    )
 
 
 def provision_user(db, subject, email, name):

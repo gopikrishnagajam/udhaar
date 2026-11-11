@@ -31,7 +31,7 @@ def main():
     owner, guest = Client(base), Client(base)
     assert owner.call('/api/health')['ok']
     if owner.call('/api/auth/config')['provider'] != 'local':
-        raise SystemExit('This password smoke test requires UDHAAR_AUTH_PROVIDER=local. For Supabase OTP testing, see docs/supabase-implementation.md.')
+        raise SystemExit('This password smoke test requires UDHAAR_AUTH_PROVIDER=local. For Supabase OTP testing, see docs/authentication.md.')
     email = f'smoke-{secrets.token_hex(8)}@example.com'
     password = secrets.token_urlsafe(24)
     owner.call('/api/register', {'name': 'Docker smoke test', 'email': email, 'password': password})
