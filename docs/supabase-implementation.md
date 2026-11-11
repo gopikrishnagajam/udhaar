@@ -21,7 +21,12 @@ admin key or service-role key is required by the app.
 The UI requests `/api/auth/otp`, verifies through `/api/auth/verify`, and loads the
 profile through `/api/me`. Supabase creates an Auth account only when signup is
 requested. Existing-account signup is rejected locally before sending another
-code. A provider email-address collision with a legacy local account requires
+code. Sign-in with no app profile returns `409` with `detail.code=signup_required`
+before requesting a provider code or consuming an email-send cooldown. The UI
+opens `/signup`, retains the email, and asks for a name. Request checks remain
+rate limited. An unfinished provider registration without an app profile can
+complete through this signup flow; only verified identities create app profiles.
+A provider email-address collision with a legacy local account requires
 manual account migration; app records are not reassigned by email.
 
 ## Tokens and validation

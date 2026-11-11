@@ -1,5 +1,6 @@
 """Udhaar MVP API and its zero-build frontend."""
 import hashlib
+import os
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -11,18 +12,30 @@ from argon2.exceptions import VerifyMismatchError, VerificationError
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, func, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
-from .models import Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan, Invitation, ItemReturn, RecordEvent, AppInvitation, now
+from .models import (
+    Base, engine, SessionLocal, User, LoginSession, Contact, Record, ItemLoan,
+    Invitation, ItemReturn, RecordEvent, AppInvitation, uid, now,
+)
+from .schemas import (
+    Credentials, Register, RecordCreate, RecordEdit,
+    ShareResponse, InviteEmail, QuantityBody,
+)
 from . import supabase_auth, email_delivery, policies
 from .migrate import ensure_database_current
 
+
+def cookie_secure() -> bool:
+    return os.getenv('UDHAAR_COOKIE_SECURE') == 'true'
+
+
 @asynccontextmanager
 async def lifespan(app):
-    ensure_database_current()
+    if os.getenv('VERCEL') != '1':
+        ensure_database_current()
     yield
 
 
@@ -31,71 +44,6 @@ ROOT = Path(__file__).resolve().parent.parent
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 app.include_router(policies.router)
 ph = PasswordHasher()
-
-class Credentials(BaseModel):
-    email: str = Field(min_length=3, max_length=255)
-    password: str = Field(min_length=8, max_length=200)
-
-    @field_validator('email')
-    @classmethod
-    def normalize_email(cls, value):
-        if '@' not in value or value.startswith('@') or value.endswith('@'):
-            raise ValueError('Enter a valid email')
-        return value.strip().casefold()
-
-class Register(Credentials):
-    name: str = Field(min_length=1, max_length=100)
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, value):
-        if not value.strip():
-            raise ValueError("Name is required")
-        return value.strip()
-
-class RecordCreate(BaseModel):
-    direction: Literal['LENT', 'BORROWED']
-    mode: Literal['OFF', 'ON'] = 'OFF'
-    contact_name: str = Field(min_length=1, max_length=100)
-    contact_email: str | None = Field(default=None, max_length=255)
-    item_name: str = Field(min_length=1, max_length=160)
-    category: str = Field(default='Other', max_length=80)
-    quantity: int = Field(default=1, ge=1, le=100000)
-    loan_date: date
-    due_date: date | None = None
-    notes: str = Field(default='', max_length=2000)
-
-    @field_validator('contact_email')
-    @classmethod
-    def valid_contact_email(cls, value):
-        return email_delivery.normalize_email(value) if value else None
-
-    @model_validator(mode='after')
-    def check_dates(self):
-        if self.mode == 'ON' and not self.contact_email:
-            raise ValueError('An email address is required for On the Record')
-        if self.due_date and self.due_date < self.loan_date:
-            raise ValueError('Return date must be on or after the lending date')
-        return self
-
-class RecordEdit(BaseModel):
-    item_name: str | None = Field(default=None, min_length=1, max_length=160)
-    due_date: date | None = None
-    notes: str | None = Field(default=None, max_length=2000)
-
-class ShareResponse(BaseModel):
-    accept: bool
-
-class InviteEmail(BaseModel):
-    email: str = Field(min_length=3, max_length=255)
-
-    @field_validator('email')
-    @classmethod
-    def valid_email(cls, value):
-        return email_delivery.normalize_email(value)
-
-class QuantityBody(BaseModel):
-    quantity: int = Field(ge=1, le=100000)
 
 def get_db():
     db = SessionLocal()
@@ -118,6 +66,9 @@ def auth_user(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(401, 'Please sign in')
     session = db.get(LoginSession, digest(token))
     if not session or utc(session.expires_at) <= now():
+        if session:
+            db.delete(session)
+            db.commit()
         raise HTTPException(401, 'Session expired')
     user = db.get(User, session.user_id)
     if not user:
@@ -134,9 +85,12 @@ app.include_router(supabase_auth.make_router(get_db, require_csrf))
 def event(db: Session, rec: Record, actor: str, kind: str, description: str):
     db.add(RecordEvent(record_id=rec.id, actor=actor, event_type=kind, description=description))
 
-def get_owned(db: Session, user: User, rid: str):
-    rec = db.get(Record, rid)
-    if not rec or rec.owner_id != user.id:
+def get_owned(db: Session, user: User, rid: str, for_update: bool = False):
+    stmt = select(Record).where(Record.id == rid, Record.owner_id == user.id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    rec = db.scalar(stmt)
+    if not rec:
         raise HTTPException(404, 'Record not found')
     return rec
 
@@ -160,12 +114,15 @@ def summary(rec: Record):
         'created_at': rec.created_at.isoformat(),
     }
 
-def detail(rec: Record):
-    result = summary(rec)
-    result['returns'] = [
+def serialize_returns(rec: Record):
+    return [
         {'id': r.id, 'quantity': r.quantity, 'status': r.status, 'proposed_by': r.proposed_by,
          'created_at': r.created_at.isoformat()} for r in sorted(rec.returns, key=lambda x: x.created_at, reverse=True)
     ]
+
+def detail(rec: Record):
+    result = summary(rec)
+    result['returns'] = serialize_returns(rec)
     result['events'] = [
         {'type': e.event_type, 'actor': e.actor, 'description': e.description,
          'created_at': e.created_at.isoformat()} for e in sorted(rec.events, key=lambda x: x.created_at, reverse=True)
@@ -197,12 +154,13 @@ def recipient_invitation(db, user, invitation_id):
     return available_invitation(db, inv)
 
 
-def recipient_view(db, inv, rec):
-    result = detail(rec)
+def recipient_view(db, inv, rec, owner_name: str | None = None):
+    result = summary(rec)
+    result['returns'] = serialize_returns(rec)
     result.pop('notes', None)
-    result.pop('events', None)
     result.pop('contact_email', None)
-    result.update(owner_name=db.get(User, rec.owner_id).name, invitation_id=inv.id,
+    resolved_owner = owner_name if owner_name is not None else db.get(User, rec.owner_id).name
+    result.update(owner_name=resolved_owner, invitation_id=inv.id,
                   invitation_state=inv.state, link_expires_at=inv.expires_at.isoformat())
     return result
 
@@ -210,18 +168,9 @@ def recipient_view(db, inv, rec):
 def deliver_record(db, rec, user, email):
     if email == user.email.casefold():
         raise HTTPException(422, 'Enter the other person\'s email address')
-    recipient = db.scalar(select(User).where(func.lower(User.email) == email))
-    for old in db.scalars(select(Invitation).where(Invitation.record_id == rec.id, Invitation.state.in_(['PENDING', 'ACCEPTED']))):
-        old.state = 'REVOKED'
+    recipient = db.scalar(select(User).where(User.email == email))
+    inv_id = uid()
     raw = secrets.token_urlsafe(36)
-    inv = Invitation(record_id=rec.id, token_hash=digest(raw), recipient_email=email,
-                     recipient_user_id=recipient.id if recipient else None,
-                     delivery='IN_APP' if recipient else 'EMAIL', expires_at=now() + timedelta(days=30))
-    db.add(inv)
-    rec.mode = 'ON'
-    rec.acknowledgment = 'PENDING'
-    event(db, rec, 'OWNER', 'INVITED', 'Acknowledgment requested in app' if recipient else 'Acknowledgment link emailed (identity unverified)')
-    db.flush()
     path = f'/share/{raw}'
     if not recipient:
         url = email_delivery.public_url(path)
@@ -231,7 +180,21 @@ def deliver_record(db, rec, user, email):
             f'Review the loan and accept or decline here:\n{url}\n\n'
             'No account is needed. Keep this private link for return acknowledgments too. '
             'It expires in 30 days. Only acknowledge a loan you recognize.\n\n'
-            f'Optional: create your own Udhaar account at {signup_url}', f'loan-invite/{inv.id}')
+            f'Optional: create your own Udhaar account at {signup_url}', f'loan-invite/{inv_id}')
+    for old in db.scalars(select(Invitation).where(Invitation.record_id == rec.id, Invitation.state.in_(['PENDING', 'ACCEPTED']))):
+        old.state = 'REVOKED'
+    if rec.contact.email is None:
+        shared_contacts = db.scalar(select(func.count()).select_from(Record).where(Record.contact_id == rec.contact_id))
+        if shared_contacts == 1:
+            rec.contact.email = email
+    inv = Invitation(id=inv_id, record_id=rec.id, token_hash=digest(raw), recipient_email=email,
+                     recipient_user_id=recipient.id if recipient else None,
+                     delivery='IN_APP' if recipient else 'EMAIL', expires_at=now() + timedelta(days=30))
+    db.add(inv)
+    rec.mode = 'ON'
+    rec.acknowledgment = 'PENDING'
+    event(db, rec, 'OWNER', 'INVITED', 'Acknowledgment requested in app' if recipient else 'Acknowledgment link emailed (identity unverified)')
+    db.flush()
     return {'delivery': inv.delivery, 'expires_at': inv.expires_at.isoformat(), 'status': 'PENDING'}
 
 
@@ -290,13 +253,16 @@ async def security_headers(request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['Cache-Control'] = 'no-store'
+    if request.url.path.startswith('/static/'):
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+    else:
+        response.headers['Cache-Control'] = 'no-store'
     return response
 
 @app.get('/api/csrf')
 def csrf_cookie(request: Request, response: Response):
     token = request.cookies.get('udhaar_csrf') or secrets.token_urlsafe(32)
-    response.set_cookie('udhaar_csrf', token, secure=(__import__('os').getenv('UDHAAR_COOKIE_SECURE') == 'true'),
+    response.set_cookie('udhaar_csrf', token, secure=cookie_secure(),
                         samesite='lax', path='/', httponly=False)
     return {'csrf': token}
 
@@ -373,7 +339,7 @@ def start_session(response: Response, db: Session, user: User):
     db.add(LoginSession(id_hash=digest(value), user_id=user.id, expires_at=now() + timedelta(days=14)))
     db.commit()
     response.set_cookie('udhaar_session', value, httponly=True, samesite='lax', path='/',
-                        secure=(__import__('os').getenv('UDHAAR_COOKIE_SECURE') == 'true'), max_age=14*24*3600)
+                        secure=cookie_secure(), max_age=14*24*3600)
 
 @app.post('/api/register', dependencies=[Depends(require_csrf)])
 def register(data: Register, response: Response, db: Session = Depends(get_db)):
@@ -415,7 +381,13 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
 @app.get('/api/records')
 def all_records(user: User = Depends(auth_user), db: Session = Depends(get_db)):
-    records = db.scalars(select(Record).where(Record.owner_id == user.id).order_by(Record.created_at.desc())).all()
+    stmt = (
+        select(Record)
+        .where(Record.owner_id == user.id)
+        .options(joinedload(Record.contact), joinedload(Record.item), selectinload(Record.returns))
+        .order_by(Record.created_at.desc())
+    )
+    records = db.scalars(stmt).unique().all()
     return [summary(r) for r in records]
 
 @app.post('/api/records', dependencies=[Depends(require_csrf)], status_code=201)
@@ -424,7 +396,7 @@ def create_record(body: RecordCreate, user: User = Depends(auth_user), db: Sessi
     item_name = body.item_name.strip()
     if not name or not item_name:
         raise HTTPException(422, 'Item and person names are required')
-    contact_match = (func.lower(Contact.email) == body.contact_email if body.contact_email else
+    contact_match = (Contact.email == body.contact_email if body.contact_email else
                      (Contact.name == name) & Contact.email.is_(None))
     contact = db.scalar(select(Contact).where(Contact.owner_id == user.id, contact_match))
     if not contact:
@@ -456,7 +428,7 @@ def record_details(record_id: str, user: User = Depends(auth_user), db: Session 
 
 @app.patch('/api/records/{record_id}', dependencies=[Depends(require_csrf)])
 def edit_record(record_id: str, body: RecordEdit, user: User = Depends(auth_user), db: Session = Depends(get_db)):
-    rec = get_owned(db, user, record_id)
+    rec = get_owned(db, user, record_id, for_update=True)
     if rec.mode == 'ON' and rec.acknowledgment != 'NONE':
         raise HTTPException(409, 'Shared records cannot be edited after sharing; create a new record for changed terms')
     if body.item_name is not None:
@@ -476,7 +448,6 @@ def edit_record(record_id: str, body: RecordEdit, user: User = Depends(auth_user
 @app.post('/api/records/{record_id}/share', dependencies=[Depends(require_csrf)])
 def create_invitation(record_id: str, body: InviteEmail, user: User = Depends(auth_user), db: Session = Depends(get_db)):
     rec = get_owned(db, user, record_id)
-    db.scalar(select(Record).where(Record.id == rec.id).with_for_update())
     if rec.returns and sum(r.quantity for r in rec.returns if r.status == 'CONFIRMED'):
         raise HTTPException(409, 'Already-returned records cannot be newly shared')
     delivery = deliver_record(db, rec, user, body.email)
@@ -486,9 +457,35 @@ def create_invitation(record_id: str, body: InviteEmail, user: User = Depends(au
 
 @app.get('/api/inbox')
 def acknowledgment_inbox(user: User = Depends(auth_user), db: Session = Depends(get_db)):
-    invitations = db.scalars(select(Invitation).where(Invitation.recipient_user_id == user.id,
-        Invitation.state.in_(['PENDING', 'ACCEPTED']), Invitation.expires_at > now()).order_by(Invitation.created_at.desc())).all()
-    return [recipient_view(db, inv, db.get(Record, inv.record_id)) for inv in invitations]
+    invitations = db.scalars(
+        select(Invitation)
+        .where(
+            Invitation.recipient_user_id == user.id,
+            Invitation.state.in_(['PENDING', 'ACCEPTED']),
+            Invitation.expires_at > now(),
+        )
+        .order_by(Invitation.created_at.desc())
+    ).all()
+    if not invitations:
+        return []
+    record_ids = {inv.record_id for inv in invitations}
+    records_by_id = {
+        rec.id: rec
+        for rec in db.scalars(
+            select(Record)
+            .where(Record.id.in_(record_ids))
+            .options(joinedload(Record.contact), joinedload(Record.item), selectinload(Record.returns))
+        ).unique().all()
+    }
+    owner_ids = {rec.owner_id for rec in records_by_id.values()}
+    owners_by_id = dict(
+        db.execute(select(User.id, User.name).where(User.id.in_(owner_ids))).all()
+    ) if owner_ids else {}
+    return [
+        recipient_view(db, inv, records_by_id[inv.record_id], owner_name=owners_by_id.get(records_by_id[inv.record_id].owner_id))
+        for inv in invitations
+        if inv.record_id in records_by_id
+    ]
 
 
 @app.get('/api/inbox/{invitation_id}')
@@ -521,12 +518,12 @@ def inbox_confirm(invitation_id: str, return_id: str, user: User = Depends(auth_
 
 @app.post('/api/records/{record_id}/returns', dependencies=[Depends(require_csrf)])
 def owner_return(record_id: str, body: QuantityBody, user: User = Depends(auth_user), db: Session = Depends(get_db)):
-    rec = get_owned(db, user, record_id)
+    rec = get_owned(db, user, record_id, for_update=True)
     return add_return(db, rec, body.quantity, 'OWNER')
 
 @app.post('/api/records/{record_id}/returns/{return_id}/confirm', dependencies=[Depends(require_csrf)])
 def owner_confirm(record_id: str, return_id: str, user: User = Depends(auth_user), db: Session = Depends(get_db)):
-    rec = get_owned(db, user, record_id)
+    rec = get_owned(db, user, record_id, for_update=True)
     item_return = db.get(ItemReturn, return_id)
     if not item_return or item_return.record_id != rec.id:
         raise HTTPException(404, 'Return not found')

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {spawn} = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const port = 8013, base = `http://127.0.0.1:${port}`;
+const port = Number(process.env.UDHAAR_TEST_PORT || 8013), base = `http://127.0.0.1:${port}`;
 const python = process.env.UDHAAR_TEST_PYTHON || path.resolve(__dirname, '../../.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 const server = spawn(python, [path.join(__dirname, 'invitation_server.py')], {
   windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, UDHAAR_TEST_PORT: String(port)},
@@ -193,7 +193,8 @@ async function navigate(page, tab) {
 
   const emails = await (await fetch(base + '/__test/emails')).json();
   const message = emails.find(email => email.email === 'recipient-with-a-long-address@example.com');
-  const url = message.message.match(/http:\/\/127\.0\.0\.1:8013\/share\/\S+/)[0];
+  const url = message.message.match(/http:\/\/127\.0\.0\.1:\d+\/share\/\S+/)[0];
+  assert.equal(new URL(url).origin, base);
   const guest = await context.newPage();
   guest.on('pageerror', error => errors.push(error.message));
   await guest.goto(url);
@@ -215,6 +216,7 @@ async function navigate(page, tab) {
   await recipient.evaluate(() => send('/api/register', {name:'Inbox recipient',email:'mobile-inbox@example.com',password:'StrongPass123!'}));
   await recipient.reload();
   await recipient.locator('#new-record').waitFor();
+  const emailCountBeforeInbox = (await (await fetch(base + '/__test/emails')).json()).length;
   await page.locator('#new-record').click();
   await page.locator('[name=item_name]').fill('Mobile inbox loan');
   await page.locator('[name=contact_name]').fill('Inbox recipient');
@@ -223,8 +225,29 @@ async function navigate(page, tab) {
   await page.locator('#record-form button[type=submit]').click();
   await page.locator('#share-action').waitFor();
   await closeDialog(page);
+  // A signed-in recipient sees incoming requests without reloading or opening the menu.
+  await recipient.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await recipient.locator('#shared-requests [data-invitation]').waitFor();
+  assert.equal((await (await fetch(base + '/__test/emails')).json()).length, emailCountBeforeInbox);
+  await fits(recipient, 'Received acknowledgment appears directly on the mobile dashboard');
+  await recipient.locator('#shared-requests [data-invitation]').click();
+  await recipient.locator('#inbox-accept').waitFor();
+  await closeDialog(recipient);
   await recipient.reload();
+  await recipient.locator('#shared-requests [data-invitation]').waitFor();
+  await navigate(recipient, 'OFF');
+  assert.equal(await recipient.locator('#shared-requests').count(), 0);
+  await navigate(recipient, 'ON');
+  await recipient.locator('#shared-requests [data-invitation]').waitFor();
+  // Sending another request after the dashboard loaded must be picked up on navigation.
+  await page.evaluate(() => send('/api/records', {direction:'BORROWED',mode:'ON',
+    contact_name:'Inbox recipient',contact_email:'mobile-inbox@example.com',item_name:'Fresh inbox loan',loan_date:'2026-10-22'}));
   await navigate(recipient, 'INBOX');
+  await recipient.locator('[data-invitation]').filter({hasText:'Fresh inbox loan'}).waitFor();
+  await recipient.locator('[data-invitation]').filter({hasText:'Fresh inbox loan'}).click();
+  await recipient.locator('#inbox-decline').click();
+  await recipient.locator('.modal-backdrop').waitFor({state:'detached'});
+  await recipient.locator('[data-invitation]').filter({hasText:'Fresh inbox loan'}).waitFor({state:'detached'});
   await fits(recipient, 'Mobile acknowledgment inbox');
   await recipient.locator('[data-invitation]').click();
   await dialogFits(recipient);
@@ -240,7 +263,8 @@ async function navigate(page, tab) {
   await page.getByText('All returned / completed', {exact:true}).waitFor();
   await closeDialog(page);
   await recipientContext.close();
-  results.push('Phone inbox supports handover acknowledgment and lender-confirmed returns');
+  results.push('Received requests appear on Overview and On the Record, refresh on focus/navigation, survive reload, and send no email');
+  results.push('Phone inbox supports decline, handover acknowledgment and lender-confirmed returns');
 
   // Test the hosted email-code layout without contacting an auth provider.
   const otp = await context.newPage();
@@ -253,6 +277,64 @@ async function navigate(page, tab) {
   await fits(otp, 'Email code sign in');
   assert.ok(await otp.locator('[name=code]').evaluate(el => parseFloat(getComputedStyle(el).fontSize) >= 16), 'Mobile fields avoid focus zoom');
   results.push('Hosted email-code sign in fits mobile screens');
+
+  // Exercise unknown-email recovery and signup with the actual app JavaScript.
+  const authRequests = [];
+  await otp.route('**/api/auth/otp', route => {
+    const payload = route.request().postDataJSON();
+    authRequests.push(payload);
+    if (payload.email === 'new@example.com' && !payload.signup) {
+      return route.fulfill({status:409,json:{detail:{code:'signup_required',message:'Create your Udhaar account to continue with this email.'}}});
+    }
+    if (payload.email === 'existing@example.com' && payload.signup) {
+      return route.fulfill({status:409,json:{detail:'An account with this email already exists. Sign in instead'}});
+    }
+    if (payload.email === 'offline@example.com') {
+      return route.fulfill({status:503,json:{detail:'Authentication service unavailable; please retry'}});
+    }
+    return route.fulfill({json:{retry_after_seconds:60}});
+  });
+  await otp.route('**/api/auth/verify', route => route.fulfill({json:{id:'new-user',name:'New user',email:'new@example.com'}}));
+  await otp.route('**/api/records', route => route.fulfill({json:[]}));
+  await otp.route('**/api/inbox', route => route.fulfill({json:[]}));
+  await otp.goto(base);
+  await otp.locator('[name=email]').fill('NEW@example.com');
+  await otp.locator('#otp-form button[type=submit]').click();
+  await otp.locator('[name=name]').waitFor();
+  assert.equal(new URL(otp.url()).pathname, '/signup');
+  assert.equal(await otp.locator('[name=email]').inputValue(), 'new@example.com');
+  assert.match(await otp.locator('#otp-error').innerText(), /Create your Udhaar account/);
+  assert.equal(await otp.locator('[name=code]').count(), 0);
+  assert.equal(await otp.locator('#otp-form button[type=submit]').isEnabled(), true);
+  await fits(otp, 'Unknown-email signup guidance');
+  await otp.locator('[name=name]').fill('New user');
+  await otp.locator('#otp-form button[type=submit]').click();
+  await otp.locator('[name=code]').fill('123456');
+  await otp.locator('#otp-form button[type=submit]').click();
+  await otp.locator('#new-record').waitFor();
+  assert.deepEqual(authRequests.slice(0,2), [{email:'new@example.com',signup:false},{email:'new@example.com',signup:true}]);
+  results.push('Unknown email opens signup with retained email, no cooldown, and completes verification');
+
+  await otp.goto(base + '/signup');
+  await otp.locator('[name=name]').fill('Existing user');
+  await otp.locator('[name=email]').fill('existing@example.com');
+  await otp.locator('#otp-form button[type=submit]').click();
+  await otp.getByText('An account with this email already exists. Sign in instead', {exact:true}).waitFor();
+  await otp.locator('#switch-auth').click();
+  assert.equal(new URL(otp.url()).pathname, '/');
+  assert.equal(await otp.locator('[name=email]').inputValue(), 'existing@example.com');
+  await otp.locator('#otp-form button[type=submit]').click();
+  await otp.locator('[name=code]').waitFor();
+  assert.deepEqual(authRequests.at(-1), {email:'existing@example.com',signup:false});
+  results.push('Duplicate signup retains email when switching to working sign-in');
+
+  await otp.goto(base);
+  await otp.locator('[name=email]').fill('offline@example.com');
+  await otp.locator('#otp-form button[type=submit]').click();
+  await otp.getByText('Authentication service unavailable; please retry', {exact:true}).waitFor();
+  assert.equal(new URL(otp.url()).pathname, '/');
+  assert.equal(await otp.locator('[name=name]').count(), 0);
+  results.push('Provider errors keep users on sign-in and show the actual error');
 
   const screenshots = process.env.UDHAAR_TEST_SCREENSHOTS;
   if (screenshots) {

@@ -6,8 +6,13 @@ import httpx
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException
 
+_ORIGINAL_HTTPX_POST = httpx.post
+_client = httpx.Client(timeout=15, follow_redirects=False)
+
 
 def normalize_email(value):
+    if not isinstance(value, str):
+        raise ValueError('Enter a valid email address')
     try:
         return validate_email(value.strip(), check_deliverability=False).normalized.casefold()
     except (EmailNotValidError, AttributeError):
@@ -29,8 +34,9 @@ def send_email(email, subject, message, key):
     sender = os.getenv('UDHAAR_EMAIL_FROM', '').strip()
     if not key_value or not sender:
         raise HTTPException(503, 'Invitation email is not configured. Set RESEND_API_KEY and UDHAAR_EMAIL_FROM')
+    post_fn = _client.post if httpx.post is _ORIGINAL_HTTPX_POST else httpx.post
     try:
-        result = httpx.post('https://api.resend.com/emails',
+        result = post_fn('https://api.resend.com/emails',
             headers={'Authorization': f'Bearer {key_value}', 'Idempotency-Key': key},
             json={'from': sender, 'to': [email], 'subject': subject, 'text': message}, timeout=15)
     except httpx.HTTPError:

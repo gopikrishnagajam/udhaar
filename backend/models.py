@@ -1,10 +1,53 @@
 """Udhaar schema. Common records can support future MoneyLoan rows."""
+from enum import StrEnum
 import uuid
 from datetime import date, datetime, timezone
 from sqlalchemy import String, Integer, ForeignKey, Date, DateTime, Text, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .database import DATABASE_URL, engine, SessionLocal
+
+
+class Direction(StrEnum):
+    LENT = 'LENT'
+    BORROWED = 'BORROWED'
+
+
+class RecordMode(StrEnum):
+    OFF = 'OFF'
+    ON = 'ON'
+
+
+class AcknowledgmentState(StrEnum):
+    NONE = 'NONE'
+    PENDING = 'PENDING'
+    CONFIRMED = 'CONFIRMED'
+    DECLINED = 'DECLINED'
+
+
+class InvitationState(StrEnum):
+    PENDING = 'PENDING'
+    ACCEPTED = 'ACCEPTED'
+    DECLINED = 'DECLINED'
+    REVOKED = 'REVOKED'
+
+
+class DeliveryChannel(StrEnum):
+    LINK = 'LINK'
+    EMAIL = 'EMAIL'
+    IN_APP = 'IN_APP'
+
+
+class ReturnStatus(StrEnum):
+    PENDING = 'PENDING'
+    CONFIRMED = 'CONFIRMED'
+    CANCELLED = 'CANCELLED'
+
+
+class Actor(StrEnum):
+    OWNER = 'OWNER'
+    GUEST = 'GUEST'
+
 
 def uid():
     return str(uuid.uuid4())
@@ -55,14 +98,14 @@ class Record(Base):
     direction: Mapped[str] = mapped_column(String(16), nullable=False)  # LENT/BORROWED relative to owner
     mode: Mapped[str] = mapped_column(String(16), default='OFF', nullable=False)  # OFF/ON
     acknowledgment: Mapped[str] = mapped_column(String(16), default='NONE', nullable=False)
-    loan_date: Mapped[datetime] = mapped_column(Date, nullable=False)
-    due_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    loan_date: Mapped[date] = mapped_column(Date, nullable=False)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default='', nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-    contact: Mapped[Contact] = relationship()
-    item: Mapped['ItemLoan'] = relationship(back_populates='record', uselist=False, cascade='all,delete-orphan')
-    returns: Mapped[list['ItemReturn']] = relationship(back_populates='record', cascade='all,delete-orphan')
+    contact: Mapped[Contact] = relationship(lazy='selectin')
+    item: Mapped['ItemLoan'] = relationship(back_populates='record', uselist=False, cascade='all,delete-orphan', lazy='selectin')
+    returns: Mapped[list['ItemReturn']] = relationship(back_populates='record', cascade='all,delete-orphan', lazy='selectin')
     events: Mapped[list['RecordEvent']] = relationship(back_populates='record', cascade='all,delete-orphan')
 
 class ItemLoan(Base):

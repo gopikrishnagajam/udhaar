@@ -127,6 +127,30 @@ def test_profile_is_stable_on_repeat_signin_and_accounts_are_isolated(remote):
     assert guest.get('/api/records/' + record.json()['id']).status_code == 404
 
 
+@pytest.mark.parametrize('direction', ['LENT', 'BORROWED'])
+def test_existing_otp_recipient_receives_in_app_request_without_email(remote, mail, direction):
+    (owner, recipient, stranger), state = remote
+    signin(owner)
+    signin(recipient, 'recipient@example.com', 'Recipient')
+    signin(stranger, 'stranger@example.com', 'Stranger')
+    response = post(owner, '/api/records', {'direction': direction, 'mode': 'ON',
+        'contact_name': 'Recipient', 'contact_email': ' RECIPIENT@EXAMPLE.COM ',
+        'item_name': 'Shared book', 'quantity': 1, 'notes': 'Private owner note', 'loan_date': '2026-10-22'})
+    assert response.status_code == 201
+    assert response.json()['invitation_delivery'] == 'IN_APP'
+    assert mail == []
+    item, = recipient.get('/api/inbox').json()
+    assert item['item_name'] == 'Shared book'
+    assert 'notes' not in item and 'events' not in item
+    assert stranger.get('/api/inbox').json() == []
+    path = f"/api/inbox/{item['invitation_id']}"
+    assert stranger.get(path).status_code == 404
+    assert post(recipient, path + '/respond', {'accept': True}).status_code == 200
+    assert owner.get('/api/records/' + response.json()['id']).json()['acknowledgment'] == 'CONFIRMED'
+    assert recipient.get('/api/inbox').json()[0]['invitation_state'] == 'ACCEPTED'
+    assert mail == []
+
+
 def test_expired_access_refreshes_and_rotates_cookies(remote):
     (owner, _, _), state = remote
     signin(owner)
@@ -272,7 +296,7 @@ def test_logout_outage_does_not_trigger_a_refresh_retry(remote):
 def test_email_delivery_failure_is_actionable_without_leaking_provider_details(remote, caplog):
     (owner, _, _), state = remote
     state['otp_failure'] = {'error_code': 'unexpected_failure', 'msg': 'Error sending confirmation email: SMTP password SECRET_SMTP_VALUE for private@example.com'}
-    response = post(owner, '/api/auth/otp', {'email': 'alex@example.com'})
+    response = post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True})
     assert response.status_code == 503
     assert 'SMTP settings' in response.json()['detail']
     assert 'upstream_status=500' in caplog.text
@@ -290,8 +314,8 @@ def test_unverified_identity_cannot_establish_a_session(remote):
 def test_otp_rate_limit_and_configuration_failure(remote, monkeypatch):
     (owner, _, _), state = remote
     for index in range(5):
-        assert post(owner, '/api/auth/otp', {'email': f'user{index}@example.com'}).status_code == 200
-    assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 429
+        assert post(owner, '/api/auth/otp', {'email': f'user{index}@example.com', 'signup': True}).status_code == 200
+    assert post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 429
     monkeypatch.delenv('SUPABASE_PUBLISHABLE_KEY')
     assert owner.get('/api/auth/config').json()['configured'] is False
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 503
@@ -309,16 +333,47 @@ def test_existing_signup_sends_no_email_and_does_not_block_signin(remote):
     assert signin(owner, signup=False).json()['id'] == original_id
 
 
-def test_email_cooldown_is_shared_between_forms_and_returns_actual_wait(remote):
+def test_unknown_signin_guides_signup_without_sending_or_consuming_email_cooldown(remote):
+    (owner, _, _), state = remote
+    response = post(owner, '/api/auth/otp', {'email': '  NEW@EXAMPLE.COM  '})
+    assert response.status_code == 409
+    assert response.json()['detail']['code'] == 'signup_required'
+    assert state['requests'] == []
+    assert owner.get('/api/me').status_code == 401
+    # Signup can immediately send and verification creates the app profile.
+    assert signin(owner, email='new@example.com', name='New user').json()['name'] == 'New user'
+    assert state['requests'][0][2] == {'email': 'new@example.com', 'create_user': True}
+
+
+def test_unknown_signin_checks_are_rate_limited(remote):
+    (owner, _, _), state = remote
+    for index in range(10):
+        assert post(owner, '/api/auth/otp', {'email': f'unknown{index}@example.com'}).status_code == 409
+    assert post(owner, '/api/auth/otp', {'email': 'another@example.com'}).status_code == 429
+    assert state['requests'] == []
+
+
+def test_unfinished_provider_signup_can_complete_through_signup_form(remote):
+    (owner, _, _), state = remote
+    state['users']['new@example.com'] = {'id': str(uuid4()), 'email': 'new@example.com',
+        'email_confirmed_at': '2026-10-22T00:00:00Z'}
+    subject = state['users']['new@example.com']['id']
+    assert post(owner, '/api/auth/otp', {'email': 'new@example.com'}).status_code == 409
+    signin(owner, email='new@example.com', name='Returning signup')
+    assert state['users']['new@example.com']['id'] == subject
+    assert owner.get('/api/me').json()['name'] == 'Returning signup'
+
+
+def test_pending_signup_email_cooldown_is_shared_between_clients_and_returns_actual_wait(remote):
     (owner, guest, _), state = remote
     assert post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 200
     state['clock'] += 10
-    blocked = post(guest, '/api/auth/otp', {'email': 'ALEX@example.com', 'signup': False})
+    blocked = post(guest, '/api/auth/otp', {'email': 'ALEX@example.com', 'signup': True})
     assert blocked.status_code == 429
     assert blocked.headers['retry-after'] == '50'
     assert len(state['requests']) == 1
     state['clock'] += 50
-    assert post(guest, '/api/auth/otp', {'email': 'alex@example.com'}).status_code == 200
+    assert post(guest, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True}).status_code == 200
     assert len(state['requests']) == 2
 
 
@@ -359,7 +414,7 @@ def test_local_token_validation_rejects_forged_signatures(remote):
 def test_upstream_rate_limit_keeps_provider_retry_after(remote):
     (owner, _, _), state = remote
     state.update(otp_status=429, otp_headers={'Retry-After': '120'}, otp_failure={'error_code': 'over_email_send_rate_limit', 'msg': 'Email rate limit exceeded'})
-    result = post(owner, '/api/auth/otp', {'email': 'alex@example.com'})
+    result = post(owner, '/api/auth/otp', {'email': 'alex@example.com', 'signup': True})
     assert result.status_code == 429
     assert result.headers['retry-after'] == '120'
     assert 'Supabase' in result.json()['detail']
@@ -387,3 +442,34 @@ def test_anonymous_loan_link_still_supports_both_acknowledgments(remote, mail):
     result = guest.get('/api' + path).json()
     assert result['handover_acknowledgment'] == 'CONFIRMED'
     assert result['return_acknowledgment'] == 'CONFIRMED'
+
+
+def test_vercel_forwarded_ip_isolates_rate_limits_and_inline_user_skips_extra_fetch(remote, monkeypatch):
+    (owner, guest, _), state = remote
+    monkeypatch.setenv('VERCEL', '1')
+    for idx in range(5):
+        resp = owner.post(
+            '/api/auth/otp',
+            json={'email': f'ip1-user{idx}@example.com', 'signup': True},
+            headers={'X-CSRF-Token': owner.cookies.get('udhaar_csrf', ''), 'X-Forwarded-For': '203.0.113.10, 10.0.0.1'},
+        )
+        assert resp.status_code == 200
+    blocked = owner.post(
+        '/api/auth/otp',
+        json={'email': 'ip1-extra@example.com', 'signup': True},
+        headers={'X-CSRF-Token': owner.cookies.get('udhaar_csrf', ''), 'X-Forwarded-For': '203.0.113.10'},
+    )
+    assert blocked.status_code == 429
+    allowed_other_ip = guest.post(
+        '/api/auth/otp',
+        json={'email': 'ip2-user@example.com', 'signup': True},
+        headers={'X-CSRF-Token': guest.cookies.get('udhaar_csrf', ''), 'X-Forwarded-For': '198.51.100.22'},
+    )
+    assert allowed_other_ip.status_code == 200
+
+    # When session response already includes the verified user payload, /user is not called.
+    user_obj = {'id': str(uuid4()), 'email': 'ip2-user@example.com', 'email_confirmed_at': '2026-10-22T00:00:00Z', 'is_anonymous': False}
+    access = state['mint'](user_obj)
+    subject, email = auth.verified_identity(access, user_obj)
+    assert subject == user_obj['id']
+    assert email == 'ip2-user@example.com'
